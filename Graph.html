@@ -1,0 +1,568 @@
+<script>
+/**
+ * @fileoverview Graph.html - Bộ vẽ đồ thị tương tác tốc độ cao (Dual-Engine: FastCanvas 60FPS + Plotly.js).
+ * Mặc định sử dụng HTML5 Canvas 2D siêu tốc (< 1ms mỗi lần vẽ, hỗ trợ kéo pan, cuộn zoom, chỉ chuột xem toạ độ,
+ * xuất ảnh PNG tức thì) để loại bỏ hoàn toàn độ trễ khi chạm nút. Đồng thời tương thích hoàn toàn với Plotly.js.
+ */
+
+var IntegralGraph = (function() {
+  var plotStates = {};
+  var usePlotlyEngine = false;
+
+  function setEngineMode(usePlotly) {
+    usePlotlyEngine = Boolean(usePlotly);
+    var keys = Object.keys(plotStates);
+    for (var i = 0; i < keys.length; i++) {
+      var id = keys[i];
+      if (plotStates[id] && plotStates[id].config) {
+        renderFunctionPlot(id, plotStates[id].config);
+      }
+    }
+  }
+
+  function getEngineMode() {
+    return usePlotlyEngine ? 'plotly' : 'canvas';
+  }
+
+  function roundClean(val) {
+    if (!isFinite(val)) return '';
+    return Math.round(val * 10000) / 10000;
+  }
+
+  function renderFunctionPlot(containerId, config) {
+    var container = document.getElementById(containerId);
+    if (!container) return;
+
+    var xCurve = config.xCurve || [];
+    var yCurve = config.yCurve || [];
+    var xMin = -5, xMax = 5, yMin = -5, yMax = 5;
+
+    if (xCurve.length > 0) {
+      xMin = xCurve[0];
+      xMax = xCurve[xCurve.length - 1];
+    }
+    var validY = [];
+    for (var i = 0; i < yCurve.length; i++) {
+      if (yCurve[i] !== null && isFinite(yCurve[i])) validY.push(yCurve[i]);
+    }
+    if (validY.length > 0) {
+      var minV = Math.min.apply(null, validY);
+      var maxV = Math.max.apply(null, validY);
+      minV = Math.min(minV, 0);
+      maxV = Math.max(maxV, 0);
+      var spanY = Math.max(maxV - minV, 2);
+      yMin = minV - spanY * 0.18;
+      yMax = maxV + spanY * 0.22;
+    }
+
+    plotStates[containerId] = {
+      config: config,
+      view: { xMin: xMin, xMax: xMax, yMin: yMin, yMax: yMax },
+      defaultView: { xMin: xMin, xMax: xMax, yMin: yMin, yMax: yMax },
+      hoverPoint: null
+    };
+
+    if (usePlotlyEngine && typeof Plotly !== 'undefined') {
+      renderWithPlotly(container, config);
+    } else {
+      renderWithFastCanvas(containerId, container);
+    }
+  }
+
+  function renderWithFastCanvas(containerId, container) {
+    var st = plotStates[containerId];
+    if (!st) return;
+
+    var canvas = container.querySelector('canvas.fast-plot-canvas');
+    if (!canvas) {
+      container.innerHTML = '';
+      canvas = document.createElement('canvas');
+      canvas.className = 'fast-plot-canvas';
+      canvas.style.width = '100%';
+      canvas.style.height = '100%';
+      canvas.style.display = 'block';
+      canvas.style.cursor = 'grab';
+      container.appendChild(canvas);
+      attachCanvasInteractions(containerId, canvas);
+    }
+
+    drawCanvasFrame(containerId, canvas);
+  }
+
+  function drawCanvasFrame(containerId, canvas) {
+    var st = plotStates[containerId];
+    if (!st || !canvas) return;
+    var cfg = st.config;
+    var view = st.view;
+
+    var rect = canvas.parentElement.getBoundingClientRect();
+    var width = Math.max(rect.width || 600, 280);
+    var height = Math.max(rect.height || 350, 220);
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+    }
+
+    var ctx = canvas.getContext('2d');
+    ctx.save();
+    ctx.scale(dpr, dpr);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+
+    var padL = 52, padR = 20, padT = 36, padB = 38;
+    var plotW = Math.max(width - padL - padR, 50);
+    var plotH = Math.max(height - padT - padB, 50);
+
+    var toPxX = function(x) {
+      return padL + ((x - view.xMin) / (view.xMax - view.xMin)) * plotW;
+    };
+    var toPxY = function(y) {
+      return padT + plotH - ((y - view.yMin) / (view.yMax - view.yMin)) * plotH;
+    };
+
+    ctx.fillStyle = '#0f172a';
+    ctx.font = '700 13px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(cfg.title || ('Đồ thị y = ' + cfg.exprText), padL, 22);
+
+    ctx.font = '600 11px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#1d4ed8';
+    ctx.fillText('■ f ≥ 0 (Dương)', width - padR - 110, 22);
+    ctx.fillStyle = '#d97706';
+    ctx.fillText('■ f < 0 (Âm)', width - padR, 22);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(padL, padT, plotW, plotH);
+    ctx.clip();
+
+    ctx.strokeStyle = '#f1f5f9';
+    ctx.lineWidth = 1;
+    var xStep = niceStep((view.xMax - view.xMin) / 7);
+    var yStep = niceStep((view.yMax - view.yMin) / 6);
+
+    var firstX = Math.ceil(view.xMin / xStep) * xStep;
+    for (var gx = firstX; gx <= view.xMax; gx += xStep) {
+      var px = toPxX(gx);
+      ctx.beginPath();
+      ctx.moveTo(px, padT);
+      ctx.lineTo(px, padT + plotH);
+      ctx.stroke();
+    }
+
+    var firstY = Math.ceil(view.yMin / yStep) * yStep;
+    for (var gy = firstY; gy <= view.yMax; gy += yStep) {
+      var py = toPxY(gy);
+      ctx.beginPath();
+      ctx.moveTo(padL, py);
+      ctx.lineTo(padL + plotW, py);
+      ctx.stroke();
+    }
+
+    var yZeroPx = toPxY(0);
+    var xZeroPx = toPxX(0);
+
+    var mode = cfg.mode || 'definite';
+    var showAbs = Boolean(cfg.showAbs);
+    if (mode === 'definite' && cfg.xFillPos && cfg.xFillPos.length > 1) {
+      ctx.fillStyle = 'rgba(29, 78, 216, 0.22)';
+      ctx.beginPath();
+      var startedPos = false;
+      for (var i = 0; i < cfg.xFillPos.length; i++) {
+        var xp = cfg.xFillPos[i];
+        var yp = cfg.yFillPos[i];
+        if (yp === null || !isFinite(yp)) continue;
+        var cx = toPxX(xp);
+        var cy = toPxY(yp);
+        if (!startedPos) {
+          ctx.moveTo(cx, yZeroPx);
+          ctx.lineTo(cx, cy);
+          startedPos = true;
+        } else {
+          ctx.lineTo(cx, cy);
+        }
+      }
+      if (startedPos) {
+        var lastXPos = toPxX(cfg.xFillPos[cfg.xFillPos.length - 1]);
+        ctx.lineTo(lastXPos, yZeroPx);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      if (!showAbs && cfg.xFillNeg && cfg.xFillNeg.length > 1) {
+        ctx.fillStyle = 'rgba(217, 119, 6, 0.26)';
+        ctx.beginPath();
+        var startedNeg = false;
+        for (var j = 0; j < cfg.xFillNeg.length; j++) {
+          var xn = cfg.xFillNeg[j];
+          var yn = cfg.yFillNeg[j];
+          if (yn === null || !isFinite(yn)) continue;
+          var cxn = toPxX(xn);
+          var cyn = toPxY(yn);
+          if (!startedNeg) {
+            ctx.moveTo(cxn, yZeroPx);
+            ctx.lineTo(cxn, cyn);
+            startedNeg = true;
+          } else {
+            ctx.lineTo(cxn, cyn);
+          }
+        }
+        if (startedNeg) {
+          var lastXNeg = toPxX(cfg.xFillNeg[cfg.xFillNeg.length - 1]);
+          ctx.lineTo(lastXNeg, yZeroPx);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+    }
+
+    ctx.strokeStyle = '#64748b';
+    ctx.lineWidth = 1.3;
+    if (yZeroPx >= padT && yZeroPx <= padT + plotH) {
+      ctx.beginPath();
+      ctx.moveTo(padL, yZeroPx);
+      ctx.lineTo(padL + plotW, yZeroPx);
+      ctx.stroke();
+    }
+    if (xZeroPx >= padL && xZeroPx <= padL + plotW) {
+      ctx.beginPath();
+      ctx.moveTo(xZeroPx, padT);
+      ctx.lineTo(xZeroPx, padT + plotH);
+      ctx.stroke();
+    }
+
+    if (mode === 'definite' && isFinite(cfg.a) && isFinite(cfg.b)) {
+      ctx.save();
+      ctx.strokeStyle = '#334155';
+      ctx.lineWidth = 1.3;
+      ctx.setLineDash([4, 4]);
+      var ax = toPxX(cfg.a);
+      var bx = toPxX(cfg.b);
+      var fay = isFinite(cfg.fa) ? toPxY(cfg.fa) : yZeroPx;
+      var fby = isFinite(cfg.fb) ? toPxY(cfg.fb) : yZeroPx;
+
+      ctx.beginPath();
+      ctx.moveTo(ax, yZeroPx);
+      ctx.lineTo(ax, fay);
+      ctx.moveTo(bx, yZeroPx);
+      ctx.lineTo(bx, fby);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.strokeStyle = '#1d4ed8';
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    var penDown = false;
+    var xCurve = cfg.xCurve || [];
+    var yCurve = cfg.yCurve || [];
+    for (var k = 0; k < xCurve.length; k++) {
+      var yv = yCurve[k];
+      if (yv === null || !isFinite(yv)) {
+        penDown = false;
+        continue;
+      }
+      var pxCurve = toPxX(xCurve[k]);
+      var pyCurve = toPxY(yv);
+      if (!penDown) {
+        ctx.moveTo(pxCurve, pyCurve);
+        penDown = true;
+      } else {
+        ctx.lineTo(pxCurve, pyCurve);
+      }
+    }
+    ctx.stroke();
+
+    if (mode === 'definite' && isFinite(cfg.a) && isFinite(cfg.b)) {
+      ctx.fillStyle = '#0f172a';
+      ctx.font = '700 11px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      if (isFinite(cfg.fa)) {
+        var pax = toPxX(cfg.a), pay = toPxY(cfg.fa);
+        ctx.beginPath(); ctx.arc(pax, pay, 4, 0, Math.PI * 2); ctx.fill();
+        ctx.fillText('a=' + roundClean(cfg.a), pax, pay - 8);
+      }
+      if (isFinite(cfg.fb)) {
+        var pbx = toPxX(cfg.b), pby = toPxY(cfg.fb);
+        ctx.beginPath(); ctx.arc(pbx, pby, 4, 0, Math.PI * 2); ctx.fill();
+        ctx.fillText('b=' + roundClean(cfg.b), pbx, pby - 8);
+      }
+    }
+
+    if (st.hoverPoint) {
+      var hx = toPxX(st.hoverPoint.x);
+      var hy = toPxY(st.hoverPoint.y);
+      ctx.fillStyle = '#dc2626';
+      ctx.beginPath();
+      ctx.arc(hx, hy, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      var labelTxt = '(' + roundClean(st.hoverPoint.x) + '; ' + roundClean(st.hoverPoint.y) + ')';
+      ctx.font = '600 11px ui-monospace, monospace';
+      var tw = ctx.measureText(labelTxt).width + 12;
+      var tx = Math.min(Math.max(hx - tw / 2, padL + 4), padL + plotW - tw - 4);
+      var ty = Math.max(hy - 26, padT + 6);
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
+      ctx.fillRect(tx, ty, tw, 20);
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'left';
+      ctx.fillText(labelTxt, tx + 6, ty + 14);
+    }
+
+    ctx.restore();
+
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padL, padT, plotW, plotH);
+
+    ctx.fillStyle = '#475569';
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    for (var txVal = firstX; txVal <= view.xMax; txVal += xStep) {
+      var txPx = toPxX(txVal);
+      if (txPx >= padL + 10 && txPx <= padL + plotW - 10) {
+        ctx.fillText(String(roundClean(txVal)), txPx, padT + plotH + 16);
+      }
+    }
+
+    ctx.textAlign = 'right';
+    for (var tyVal = firstY; tyVal <= view.yMax; tyVal += yStep) {
+      var tyPx = toPxY(tyVal);
+      if (tyPx >= padT + 8 && tyPx <= padT + plotH - 8) {
+        ctx.fillText(String(roundClean(tyVal)), padL - 6, tyPx + 4);
+      }
+    }
+
+    ctx.restore();
+  }
+
+  function niceStep(rawStep) {
+    if (!isFinite(rawStep) || rawStep <= 0) return 1;
+    var mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    var res = rawStep / mag;
+    if (res > 5) return 10 * mag;
+    if (res > 2) return 5 * mag;
+    if (res > 1) return 2 * mag;
+    return mag;
+  }
+
+  function attachCanvasInteractions(containerId, canvas) {
+    var isDragging = false;
+    var lastX = 0, lastY = 0;
+
+    canvas.addEventListener('pointerdown', function(ev) {
+      isDragging = true;
+      lastX = ev.clientX;
+      lastY = ev.clientY;
+      canvas.style.cursor = 'grabbing';
+      if (canvas.setPointerCapture) {
+        try { canvas.setPointerCapture(ev.pointerId); } catch (e) {}
+      }
+    });
+
+    canvas.addEventListener('pointermove', function(ev) {
+      var st = plotStates[containerId];
+      if (!st) return;
+      var rect = canvas.getBoundingClientRect();
+      var padL = 52, padR = 20, padT = 36, padB = 38;
+      var plotW = Math.max(rect.width - padL - padR, 50);
+      var plotH = Math.max(rect.height - padT - padB, 50);
+
+      if (isDragging) {
+        var dx = ev.clientX - lastX;
+        var dy = ev.clientY - lastY;
+        lastX = ev.clientX;
+        lastY = ev.clientY;
+
+        var spanX = st.view.xMax - st.view.xMin;
+        var spanY = st.view.yMax - st.view.yMin;
+        var shiftX = -(dx / plotW) * spanX;
+        var shiftY = (dy / plotH) * spanY;
+
+        st.view.xMin += shiftX;
+        st.view.xMax += shiftX;
+        st.view.yMin += shiftY;
+        st.view.yMax += shiftY;
+        st.hoverPoint = null;
+        drawCanvasFrame(containerId, canvas);
+        return;
+      }
+
+      var mx = ev.clientX - rect.left;
+      if (mx < padL || mx > rect.width - padR) {
+        if (st.hoverPoint) {
+          st.hoverPoint = null;
+          drawCanvasFrame(containerId, canvas);
+        }
+        return;
+      }
+      var xVal = st.view.xMin + ((mx - padL) / plotW) * (st.view.xMax - st.view.xMin);
+      var xCurve = st.config.xCurve || [];
+      var yCurve = st.config.yCurve || [];
+      var bestIdx = -1;
+      var bestDist = Infinity;
+      for (var i = 0; i < xCurve.length; i++) {
+        if (yCurve[i] === null || !isFinite(yCurve[i])) continue;
+        var d = Math.abs(xCurve[i] - xVal);
+        if (d < bestDist) {
+          bestDist = d;
+          bestIdx = i;
+        }
+      }
+      if (bestIdx !== -1) {
+        st.hoverPoint = { x: xCurve[bestIdx], y: yCurve[bestIdx] };
+        drawCanvasFrame(containerId, canvas);
+      }
+    });
+
+    var stopDrag = function() {
+      isDragging = false;
+      canvas.style.cursor = 'grab';
+    };
+    canvas.addEventListener('pointerup', stopDrag);
+    canvas.addEventListener('pointercancel', stopDrag);
+    canvas.addEventListener('pointerleave', function() {
+      isDragging = false;
+      var st = plotStates[containerId];
+      if (st && st.hoverPoint) {
+        st.hoverPoint = null;
+        drawCanvasFrame(containerId, canvas);
+      }
+    });
+
+    canvas.addEventListener('wheel', function(ev) {
+      ev.preventDefault();
+      var st = plotStates[containerId];
+      if (!st) return;
+      var factor = ev.deltaY < 0 ? 0.86 : 1.16;
+      var midX = 0.5 * (st.view.xMin + st.view.xMax);
+      var midY = 0.5 * (st.view.yMin + st.view.yMax);
+      var halfX = 0.5 * (st.view.xMax - st.view.xMin) * factor;
+      var halfY = 0.5 * (st.view.yMax - st.view.yMin) * factor;
+      st.view.xMin = midX - halfX;
+      st.view.xMax = midX + halfX;
+      st.view.yMin = midY - halfY;
+      st.view.yMax = midY + halfY;
+      drawCanvasFrame(containerId, canvas);
+    }, { passive: false });
+  }
+
+  function renderWithPlotly(container, config) {
+    var traces = [];
+    var mode = config.mode || 'definite';
+    var showAbs = Boolean(config.showAbs);
+    var varName = config.variable || 'x';
+
+    if (mode === 'definite' && config.xFillPos && config.xFillPos.length > 0) {
+      traces.push({
+        x: config.xFillPos,
+        y: config.yFillPos,
+        type: 'scatter',
+        mode: 'lines',
+        line: { width: 0 },
+        fill: 'tozeroy',
+        fillcolor: 'rgba(29, 78, 216, 0.24)',
+        name: 'Miền dương (f ≥ 0)',
+        hoverinfo: 'skip'
+      });
+    }
+    if (mode === 'definite' && !showAbs && config.xFillNeg && config.xFillNeg.length > 0) {
+      traces.push({
+        x: config.xFillNeg,
+        y: config.yFillNeg,
+        type: 'scatter',
+        mode: 'lines',
+        line: { width: 0 },
+        fill: 'tozeroy',
+        fillcolor: 'rgba(217, 119, 6, 0.28)',
+        name: 'Miền âm (f < 0)',
+        hoverinfo: 'skip'
+      });
+    }
+    traces.push({
+      x: config.xCurve || [],
+      y: config.yCurve || [],
+      type: 'scatter',
+      mode: 'lines',
+      line: { color: '#1d4ed8', width: 2.5 },
+      name: 'y = ' + config.exprText
+    });
+
+    var layout = {
+      title: { text: config.title || ('Đồ thị y = ' + config.exprText), font: { size: 13 } },
+      margin: { t: 40, r: 20, b: 40, l: 48 },
+      xaxis: { title: { text: config.xLabel || ('Trục ' + varName) }, zeroline: true },
+      yaxis: { title: { text: config.yLabel || ('f(' + varName + ')') }, zeroline: true },
+      dragmode: 'pan'
+    };
+    Plotly.react(container, traces, layout, { responsive: true, scrollZoom: true, displaylogo: false });
+  }
+
+  function downloadPlotImage(containerId, filename) {
+    var container = document.getElementById(containerId);
+    if (!container) return;
+    var canvas = container.querySelector('canvas.fast-plot-canvas');
+    if (canvas) {
+      var link = document.createElement('a');
+      link.download = (filename || 'integral_lab_graph') + '.png';
+      link.href = canvas.toDataURL('image/png');
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      return;
+    }
+    if (typeof Plotly !== 'undefined') {
+      Plotly.downloadImage(container, { format: 'png', width: 1000, height: 600, filename: filename || 'integral_lab_graph' });
+    }
+  }
+
+  function resetPlotView(containerId) {
+    var container = document.getElementById(containerId);
+    var st = plotStates[containerId];
+    if (!container || !st) return;
+    st.view = {
+      xMin: st.defaultView.xMin,
+      xMax: st.defaultView.xMax,
+      yMin: st.defaultView.yMin,
+      yMax: st.defaultView.yMax
+    };
+    var canvas = container.querySelector('canvas.fast-plot-canvas');
+    if (canvas) {
+      drawCanvasFrame(containerId, canvas);
+    } else if (typeof Plotly !== 'undefined') {
+      Plotly.relayout(container, { 'xaxis.autorange': true, 'yaxis.autorange': true });
+    }
+  }
+
+  function resizePlot(containerId) {
+    var container = document.getElementById(containerId);
+    if (!container) return;
+    var canvas = container.querySelector('canvas.fast-plot-canvas');
+    if (canvas) {
+      drawCanvasFrame(containerId, canvas);
+    } else if (typeof Plotly !== 'undefined' && container.data) {
+      Plotly.Plots.resize(container);
+    }
+  }
+
+  window.addEventListener('resize', function() {
+    var keys = Object.keys(plotStates);
+    for (var i = 0; i < keys.length; i++) {
+      resizePlot(keys[i]);
+    }
+  });
+
+  return {
+    renderFunctionPlot: renderFunctionPlot,
+    downloadPlotImage: downloadPlotImage,
+    resetPlotView: resetPlotView,
+    resizePlot: resizePlot,
+    setEngineMode: setEngineMode,
+    getEngineMode: getEngineMode
+  };
+})();
+</script>

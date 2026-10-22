@@ -1,0 +1,2156 @@
+<script>
+/**
+ * @fileoverview Scripts.html - Logic điều khiển trung tâm của Integral Lab (Phiên bản tối ưu tốc độ).
+ * Các cải tiến hiệu năng cốt lõi:
+ * 1. Bộ nhớ đệm biểu thức (Expression Cache) và tái sử dụng đối tượng biến (Shared Scope) giúp Math.js
+ *    tính tích phân và lấy mẫu đồ thị trong < 2ms (không cấp phát bộ nhớ thừa).
+ * 2. Kết xuất lười theo trang (Lazy Tab Rendering): Khi tải trang chỉ tính toán và vẽ Trang chủ;
+ *    các trang khác chỉ kết xuất khi người dùng chuyển tới, giúp chuyển tab mượt tức thì.
+ * 3. Khoanh vùng MathJax (Scoped Typesetting): Chỉ biên dịch công thức trong phần tử vừa thay đổi
+ *    thay vì quét lại toàn bộ tài liệu HTML.
+ */
+
+var IntegralApp = (function() {
+  var MAX_EXPR_LENGTH = 120;
+  var MIN_SUBINTERVALS = 10;
+  var MAX_SUBINTERVALS = 1000;
+  var Y_CLIP_LIMIT = 1e5;
+
+  // Bộ nhớ đệm biên dịch hàm số Math.js và đối tượng scope dùng chung để tránh Garbage Collection
+  var compiledCache = {};
+  var sharedScope = { x: 0, t: 0, e: Math.E, pi: Math.PI };
+
+  // Trạng thái ứng dụng và cờ đánh dấu các tab đã kết xuất
+  var state = {
+    currentPage: 'home',
+    saveHistoryConsent: false,
+    examples: [],
+    localHistory: [],
+    activeApplicationId: 'app-physics-distance',
+    customAppParams: {},
+    similarProblems: {},
+    exerciseLevel: 'all',
+    exerciseSubmitted: {},
+    renderedTabs: {
+      home: false,
+      calculator: false,
+      applications: false,
+      library: false,
+      exercises: false
+    }
+  };
+
+  var FALLBACK_EXAMPLES = [
+    {
+      id: 'app-physics-distance',
+      code: 'A',
+      isApplication: true,
+      title: 'A. Vật lý: Tính quãng đường chuyển động',
+      category: 'Vật lý',
+      difficulty: 'Cơ bản',
+      situation: 'Một phương tiện chuyển động thẳng với vận tốc thay đổi theo thời gian.',
+      dataDesc: 'v(t) = 2t, với t tính bằng giây (s) và v tính bằng mét/giây (m/s).',
+      question: 'Tính quãng đường phương tiện đi được trong 5 giây đầu tiên.',
+      expr: '2*x',
+      displayExpr: 'v(t) = 2t',
+      variable: 't',
+      a: 0,
+      b: 5,
+      initialValue: 0,
+      expectedResult: 25,
+      unit: 'm',
+      rateUnit: 'm/s',
+      timeUnit: 'giây',
+      modelLatex: 's = \int_{0}^{5} 2t \, dt = 25 \text{ m}',
+      antiderivativeLatex: 'F(t) = t^2',
+      meaning: 'Diện tích hình phẳng dưới đồ thị vận tốc v(t) theo thời gian t biểu diễn độ dời của vật. Vì vận tốc v(t) = 2t không âm trên đoạn [0, 5], phương tiện không đổi chiều nên độ dời bằng đúng quãng đường đi được là 25 m.',
+      steps: [
+        'Thiết lập mô hình tích phân: s = ∫₀⁵ 2t dt.',
+        'Tìm nguyên hàm của v(t) = 2t là F(t) = t².',
+        'Áp dụng công thức Newton–Leibniz: s = F(5) - F(0) = 5² - 0² = 25 (m).',
+        'Đối chiếu hình học: Tam giác vuông dưới đồ thị có đáy 5 s, chiều cao 10 m/s ⇒ Diện tích = 0.5 × 5 × 10 = 25 (m).'
+      ]
+    },
+    {
+      id: 'app-production-output',
+      code: 'B',
+      isApplication: true,
+      title: 'B. Sản xuất: Tổng sản lượng nhà máy',
+      category: 'Sản xuất',
+      difficulty: 'Cơ bản',
+      situation: 'Một nhà máy sản xuất theo tốc độ thay đổi trong ngày làm việc.',
+      dataDesc: 'r(t) = 100 + 20t, đơn vị sản phẩm/giờ, với 0 ≤ t ≤ 8.',
+      question: 'Tính tổng số sản phẩm trong 8 giờ.',
+      expr: '100 + 20*x',
+      displayExpr: 'r(t) = 100 + 20t',
+      variable: 't',
+      a: 0,
+      b: 8,
+      initialValue: 0,
+      expectedResult: 1440,
+      unit: 'sản phẩm',
+      rateUnit: 'sản phẩm/giờ',
+      timeUnit: 'giờ',
+      modelLatex: 'N = \int_{0}^{8} (100 + 20t) \, dt = 1440 \text{ sản phẩm}',
+      antiderivativeLatex: 'F(t) = 100t + 10t^2',
+      meaning: 'Tích phân của tốc độ sản xuất r(t) (sản phẩm/giờ) theo thời gian t (giờ) trên đoạn [0, 8] biểu diễn tổng sản lượng tạo ra trong ca làm việc 8 giờ là 1.440 sản phẩm.',
+      steps: [
+        'Thiết lập mô hình tổng sản lượng: N = ∫₀⁸ (100 + 20t) dt.',
+        'Tìm nguyên hàm: F(t) = 100t + 10t².',
+        'Thế cận từ 0 đến 8: N = (100×8 + 10×8²) - 0 = 800 + 640 = 1440 (sản phẩm).'
+      ]
+    },
+    {
+      id: 'app-water-supply',
+      code: 'C',
+      isApplication: true,
+      title: 'C. Cấp nước: Tổng lượng nước qua ống',
+      category: 'Cấp nước',
+      difficulty: 'Cơ bản',
+      situation: 'Lưu lượng nước chảy qua đường ống thay đổi theo thời gian.',
+      dataDesc: 'q(t) = 3 + t, đơn vị lít/phút, với 0 ≤ t ≤ 10.',
+      question: 'Tính tổng lượng nước chảy qua đường ống trong 10 phút.',
+      expr: '3 + x',
+      displayExpr: 'q(t) = 3 + t',
+      variable: 't',
+      a: 0,
+      b: 10,
+      initialValue: 0,
+      expectedResult: 80,
+      unit: 'lít',
+      rateUnit: 'lít/phút',
+      timeUnit: 'phút',
+      modelLatex: 'V = \int_{0}^{10} (3 + t) \, dt = 80 \text{ lít}',
+      antiderivativeLatex: 'F(t) = 3t + 0.5t^2',
+      meaning: 'Phân tích đơn vị: Lưu lượng q(t) tính bằng (lít/phút) nhân với thời gian dt tính bằng (phút) tạo ra đơn vị thể tích là (lít). Tổng lượng nước thu được sau 10 phút là 80 lít.',
+      steps: [
+        'Mô hình thể tích nước tích lũy: V = ∫₀¹⁰ (3 + t) dt.',
+        'Tìm nguyên hàm: F(t) = 3t + 0.5t².',
+        'Thế cận: V = (3×10 + 0.5×10²) - 0 = 30 + 50 = 80 (lít).',
+        'Kiểm tra đơn vị: (lít/phút) × phút = lít.'
+      ]
+    },
+    {
+      id: 'app-business-cost',
+      code: 'D',
+      isApplication: true,
+      title: 'D. Kinh doanh: Tổng chi phí sản xuất',
+      category: 'Kinh doanh',
+      difficulty: 'Trung bình',
+      situation: 'Doanh nghiệp biết chi phí biên theo số lượng sản phẩm và chi phí cố định ban đầu.',
+      dataDesc: "C'(x) = 2x + 10 (nghìn đồng/sản phẩm), chi phí cố định ban đầu C(0) = 500 nghìn đồng.",
+      question: 'Tính tổng chi phí khi sản xuất 20 sản phẩm.',
+      expr: '2*x + 10',
+      displayExpr: "C'(x) = 2x + 10",
+      variable: 'x',
+      a: 0,
+      b: 20,
+      initialValue: 500,
+      expectedResult: 1100,
+      unit: 'nghìn đồng',
+      rateUnit: 'nghìn đồng/sản phẩm',
+      timeUnit: 'sản phẩm',
+      modelLatex: 'C(20) = 500 + \int_{0}^{20} (2x + 10) \, dx = 1100 \text{ nghìn đồng}',
+      antiderivativeLatex: 'F(x) = x^2 + 10x',
+      meaning: "Chi phí biên C'(x) đo mức tăng chi phí trên mỗi sản phẩm tăng thêm, còn tổng chi phí C(x) bao gồm cả chi phí cố định ban đầu (500 nghìn đồng) cộng với tích phân chi phí biên (600 nghìn đồng), bằng 1.100 nghìn đồng.",
+      steps: [
+        'Tính tổng chi phí biến đổi khi sản xuất từ 0 đến 20 sản phẩm: ΔC = ∫₀²⁰ (2x + 10) dx.',
+        'Tìm nguyên hàm: F(x) = x² + 10x ⇒ ΔC = F(20) - F(0) = 400 + 200 = 600 (nghìn đồng).',
+        'Cộng với chi phí cố định ban đầu: C(20) = 500 + 600 = 1100 (nghìn đồng).'
+      ]
+    },
+    {
+      id: 'app-power-energy',
+      code: 'E',
+      isApplication: true,
+      title: 'E. Điện năng: Tổng điện năng tiêu thụ',
+      category: 'Điện năng',
+      difficulty: 'Cơ bản',
+      situation: 'Công suất tiêu thụ điện thay đổi theo thời gian vận hành.',
+      dataDesc: 'P(t) = 2 + 0.5t, đơn vị kW, với 0 ≤ t ≤ 4 giờ.',
+      question: 'Tính điện năng tiêu thụ trong 4 giờ.',
+      expr: '2 + 0.5*x',
+      displayExpr: 'P(t) = 2 + 0.5t',
+      variable: 't',
+      a: 0,
+      b: 4,
+      initialValue: 0,
+      expectedResult: 12,
+      unit: 'kWh',
+      rateUnit: 'kW',
+      timeUnit: 'giờ',
+      modelLatex: 'E = \int_{0}^{4} (2 + 0.5t) \, dt = 12 \text{ kWh}',
+      antiderivativeLatex: 'F(t) = 2t + 0.25t^2',
+      meaning: 'Công suất tức thời P(t) (kW) tích phân theo thời gian t (giờ) cho ra tổng điện năng tiêu thụ E có đơn vị là kWh (kilowatt-giờ). Trong 4 giờ hệ thống tiêu thụ 12 kWh.',
+      steps: [
+        'Mô hình điện năng: E = ∫₀⁴ (2 + 0.5t) dt.',
+        'Tìm nguyên hàm: F(t) = 2t + 0.25t².',
+        'Thế cận từ 0 đến 4: E = (2×4 + 0.25×16) - 0 = 8 + 4 = 12 (kWh).'
+      ]
+    },
+    {
+      id: 'app-construction-area',
+      code: 'F',
+      isApplication: true,
+      title: 'F. Xây dựng: Diện tích mặt cắt',
+      category: 'Xây dựng',
+      difficulty: 'Cơ bản',
+      situation: 'Tính diện tích phần mặt cắt giới hạn bởi một đường cong parabol và trục hoành.',
+      dataDesc: 'f(x) = x², với 0 ≤ x ≤ 3 (đơn vị chiều dài giả định: mét).',
+      question: 'Tính diện tích phần nằm dưới đồ thị trên đoạn [0, 3].',
+      expr: 'x^2',
+      displayExpr: 'f(x) = x^2',
+      variable: 'x',
+      a: 0,
+      b: 3,
+      initialValue: 0,
+      expectedResult: 9,
+      unit: 'm² (đvdt)',
+      rateUnit: 'm',
+      timeUnit: 'm',
+      modelLatex: 'A = \int_{0}^{3} x^2 \, dx = 9 \text{ m}^2',
+      antiderivativeLatex: 'F(x) = \frac{x^3}{3}',
+      meaning: 'Diện tích mặt cắt ngang của cấu kiện xây dựng giới hạn bởi y = x² và trục hoành từ x = 0 đến x = 3 bằng đúng 9 đơn vị diện tích (m²).',
+      steps: [
+        'Thiết lập công thức diện tích hình phẳng: A = ∫₀³ x² dx.',
+        'Tìm nguyên hàm: F(x) = x³ / 3.',
+        'Thế cận: A = 3³/3 - 0 = 9 (m²).'
+      ]
+    },
+    {
+      id: 'app-biomed-infusion',
+      code: 'G',
+      isApplication: true,
+      title: 'G. Y sinh: Tổng lượng chất được truyền (Mô hình giả định)',
+      category: 'Y sinh',
+      difficulty: 'Trung bình',
+      situation: 'Tốc độ đưa một chất vào hệ thống sinh học mô phỏng thay đổi theo thời gian.',
+      dataDesc: 'r(t) = 15 - 2t, đơn vị mg/giờ, với 0 ≤ t ≤ 4 giờ (ví dụ giả định học tập).',
+      question: 'Tính tổng lượng chất được đưa vào hệ thống trong 4 giờ.',
+      expr: '15 - 2*x',
+      displayExpr: 'r(t) = 15 - 2t',
+      variable: 't',
+      a: 0,
+      b: 4,
+      initialValue: 0,
+      expectedResult: 44,
+      unit: 'mg',
+      rateUnit: 'mg/giờ',
+      timeUnit: 'giờ',
+      modelLatex: 'M = \int_{0}^{4} (15 - 2t) \, dt = 44 \text{ mg}',
+      antiderivativeLatex: 'F(t) = 15t - t^2',
+      meaning: 'Tích phân của tốc độ đưa chất vào (mg/giờ) theo thời gian (giờ) tạo thành tổng lượng chất tích lũy (44 mg). Lưu ý: Ví dụ hoàn toàn giả định nhằm minh họa toán học, không đưa ra khuyến nghị điều trị hoặc liều dùng y khoa.',
+      steps: [
+        'Mô hình lượng chất tích lũy: M = ∫₀⁴ (15 - 2t) dt.',
+        'Tìm nguyên hàm: F(t) = 15t - t².',
+        'Thế cận từ 0 đến 4: M = (15×4 - 4²) - 0 = 60 - 16 = 44 (mg).',
+        'Lưu ý: Chỉ giải thích cơ chế toán học (tốc độ × thời gian = lượng tích lũy), không áp dụng làm phác đồ y tế.'
+      ]
+    },
+    {
+      id: 'math-signed-sine',
+      code: 'M1',
+      isApplication: false,
+      title: 'Hàm lượng giác sin(x) đổi dấu trên [0, 2π]',
+      category: 'Giải tích',
+      difficulty: 'Trung bình',
+      situation: 'Minh họa sự khác nhau giữa tích phân có dấu và diện tích hình học phẳng.',
+      dataDesc: 'f(x) = sin(x), cận a = 0, b = 6.2832 (≈ 2π).',
+      question: 'Tính tích phân xác định và diện tích hình học của y = sin(x) trên [0, 2π].',
+      expr: 'sin(x)',
+      displayExpr: 'f(x) = \sin(x)',
+      variable: 'x',
+      a: 0,
+      b: 6.2832,
+      initialValue: 0,
+      expectedResult: 0,
+      unit: 'đvdt',
+      rateUnit: '',
+      timeUnit: '',
+      modelLatex: '\int_{0}^{2\pi} \sin(x)\,dx = 0, \quad S = \int_{0}^{2\pi} |\sin(x)|\,dx = 4',
+      antiderivativeLatex: 'F(x) = -\cos(x)',
+      meaning: 'Nửa chu kỳ đầu [0, π] nằm trên trục hoành có diện tích +2; nửa chu kỳ sau [π, 2π] nằm dưới trục hoành đóng góp -2 vào tích phân có dấu. Tổng đại số bằng 0 nhưng diện tích hình học bằng 4.',
+      steps: [
+        'Tích phân có dấu: ∫₀²π sin(x) dx = [-cos(x)]₀²π = -1 - (-1) = 0.',
+        'Diện tích hình học: S = ∫₀π sin(x) dx + ∫π²π |-sin(x)| dx = 2 + 2 = 4 (đvdt).'
+      ]
+    },
+    {
+      id: 'math-gaussian-bell',
+      code: 'M2',
+      isApplication: false,
+      title: 'Hàm phi sơ cấp exp(-x²) trên [-2, 2]',
+      category: 'Phương pháp số',
+      difficulty: 'Nâng cao',
+      situation: 'Tính tích phân của hàm chuông Gauss không có nguyên hàm sơ cấp bằng phương pháp số.',
+      dataDesc: 'f(x) = exp(-x²), cận a = -2, b = 2.',
+      question: 'Tính gần đúng tích phân ∫₋₂² exp(-x²) dx.',
+      expr: 'exp(-x^2)',
+      displayExpr: 'f(x) = e^{-x^2}',
+      variable: 'x',
+      a: -2,
+      b: 2,
+      initialValue: 0,
+      expectedResult: 1.76416,
+      unit: '',
+      rateUnit: '',
+      timeUnit: '',
+      modelLatex: 'I = \int_{-2}^{2} e^{-x^2}\,dx \approx 1.76416',
+      antiderivativeLatex: '\text{Không có nguyên hàm sơ cấp}',
+      meaning: 'Biểu thức e^(-x²) không có nguyên hàm sơ cấp. Máy tính sử dụng phương pháp số Composite Simpson 1/3 để tính xấp xỉ diện tích dưới đường cong chuông chuẩn.',
+      steps: [
+        'Xác nhận hàm f(x) = exp(-x²) không có nguyên hàm sơ cấp biểu diễn bằng hàm đại số/lượng giác/mũ cơ bản.',
+        'Chia đoạn [-2, 2] thành N khoảng đều nhau và áp dụng quy tắc Simpson 1/3.',
+        'Thu được giá trị hội tụ I ≈ 1.76416.'
+      ]
+    }
+  ];
+
+  var PRACTICE_EXERCISES = [
+    {
+      id: 'ex-basic-1',
+      level: 'Cơ bản',
+      title: 'Bài 1 (Cơ bản): Ý nghĩa diện tích hình tam giác dưới đồ thị',
+      prompt: 'Cho hàm số y = 2x trên đoạn [0, 4]. Diện tích hình phẳng giới hạn bởi đồ thị y = 2x, trục hoành Ox và hai đường thẳng x = 0, x = 4 bằng bao nhiêu?',
+      expr: '2*x',
+      a: 0,
+      b: 4,
+      answer: 16,
+      tolerance: 0.05,
+      unit: 'đvdt',
+      hint: 'Hình phẳng là tam giác vuông có đáy bằng 4 và chiều cao tại x = 4 là y = 8.',
+      solution: 'Ta có ∫₀⁴ 2x dx = [x²]₀⁴ = 4² - 0² = 16 (đvdt). Về mặt hình học, diện tích tam giác vuông là 1/2 × 4 × 8 = 16.'
+    },
+    {
+      id: 'ex-basic-2',
+      level: 'Cơ bản',
+      title: 'Bài 2 (Cơ bản): Phân biệt tích phân có dấu và diện tích hình học',
+      prompt: 'Cho hàm số f(x) = x - 2 trên đoạn [0, 4]. Hãy tính DIỆN TÍCH HÌNH HỌC phẳng giới hạn bởi đồ thị f(x) = x - 2 và trục hoành từ x = 0 đến x = 4 (lưu ý: phần dưới trục hoành vẫn tính diện tích dương).',
+      expr: 'x - 2',
+      a: 0,
+      b: 4,
+      answer: 4,
+      tolerance: 0.05,
+      unit: 'đvdt',
+      hint: 'Trên [0, 2] đồ thị nằm dưới trục hoành (tam giác diện tích 2); trên [2, 4] đồ thị nằm trên trục hoành (tam giác diện tích 2).',
+      solution: 'Tích phân có dấu ∫₀⁴ (x - 2) dx = 0 vì hai tam giác âm và dương triệt tiêu nhau. Tuy nhiên, diện tích hình học phẳng là S = ∫₀⁴ |x - 2| dx = ∫₀² (2 - x) dx + ∫₂⁴ (x - 2) dx = 2 + 2 = 4 (đvdt).'
+    },
+    {
+      id: 'ex-mid-1',
+      level: 'Trung bình',
+      title: 'Bài 3 (Trung bình): Tính tích phân hàm đa thức bậc hai',
+      prompt: 'Tính tích phân xác định I = ∫₁³ (3x² - 2x + 1) dx.',
+      expr: '3*x^2 - 2*x + 1',
+      a: 1,
+      b: 3,
+      answer: 20,
+      tolerance: 0.05,
+      unit: '',
+      hint: 'Nguyên hàm của 3x² - 2x + 1 là F(x) = x³ - x² + x.',
+      solution: 'Nguyên hàm F(x) = x³ - x² + x. Thế cận từ 1 đến 3: F(3) = 27 - 9 + 3 = 21; F(1) = 1 - 1 + 1 = 1. Vậy I = F(3) - F(1) = 21 - 1 = 20.'
+    },
+    {
+      id: 'ex-mid-2',
+      level: 'Trung bình',
+      title: 'Bài 4 (Trung bình): Tích phân hàm lượng giác',
+      prompt: 'Tính giá trị tích phân xác định I = ∫₀^(π/2) cos(x) dx (nhập kết quả số thực).',
+      expr: 'cos(x)',
+      a: 0,
+      b: 1.570796,
+      answer: 1,
+      tolerance: 0.02,
+      unit: '',
+      hint: 'Nguyên hàm của cos(x) là sin(x), và sin(π/2) = 1.',
+      solution: 'Ta có ∫₀^(π/2) cos(x) dx = [sin(x)]₀^(π/2) = sin(π/2) - sin(0) = 1 - 0 = 1.'
+    },
+    {
+      id: 'ex-adv-1',
+      level: 'Nâng cao',
+      title: 'Bài 5 (Nâng cao): Xây dựng mô hình lưu lượng nước thực tế',
+      prompt: 'Một bồn chứa nước ban đầu đã có sẵn 120 lít nước. Người ta bơm thêm nước vào bồn với lưu lượng q(t) = 6 + 2t (lít/phút). Hỏi sau 10 phút bơm, tổng lượng nước có trong bồn là bao nhiêu lít?',
+      expr: '6 + 2*x',
+      a: 0,
+      b: 10,
+      answer: 280,
+      tolerance: 0.1,
+      unit: 'lít',
+      hint: 'Tổng lượng nước = Lượng nước ban đầu (120 lít) + ∫₀¹⁰ (6 + 2t) dt.',
+      solution: 'Lượng nước bơm thêm trong 10 phút là ΔV = ∫₀¹⁰ (6 + 2t) dt = [6t + t²]₀¹⁰ = 60 + 100 = 160 (lít). Cộng với 120 lít ban đầu trong bồn, tổng lượng nước là V(10) = 120 + 160 = 280 (lít).'
+    },
+    {
+      id: 'ex-adv-2',
+      level: 'Nâng cao',
+      title: 'Bài 6 (Nâng cao): Xây dựng mô hình điện năng tiêu thụ theo ca',
+      prompt: 'Một trạm sạc xe điện có công suất tiêu thụ P(t) = 10 + 3t² (kW) với t tính bằng giờ. Tính tổng điện năng trạm sạc tiêu thụ từ giờ thứ t = 0 đến giờ thứ t = 3 (đơn vị kWh).',
+      expr: '10 + 3*x^2',
+      a: 0,
+      b: 3,
+      answer: 57,
+      tolerance: 0.1,
+      unit: 'kWh',
+      hint: 'Lập tích phân E = ∫₀³ (10 + 3t²) dt.',
+      solution: 'Mô hình tích phân: E = ∫₀³ (10 + 3t²) dt = [10t + t³]₀³ = (10×3 + 3³) - 0 = 30 + 27 = 57 (kWh).'
+    }
+  ];
+
+  // ============================================================================
+  // BỘ PHÂN TÍCH BIỂU THỨC CÓ CACHE VÀ TÍNH TÍCH PHÂN SỐ TỐC ĐỘ CAO
+  // ============================================================================
+
+  function compileSafeExpression(rawExpr) {
+    if (!rawExpr || typeof rawExpr !== 'string') {
+      return { ok: false, error: 'Vui lòng nhập biểu thức hàm số f(x).' };
+    }
+    var trimmed = rawExpr.trim();
+    if (trimmed.length === 0) {
+      return { ok: false, error: 'Biểu thức hàm số không được để trống.' };
+    }
+    if (trimmed.length > MAX_EXPR_LENGTH) {
+      return { ok: false, error: 'Biểu thức quá dài (tối đa ' + MAX_EXPR_LENGTH + ' ký tự).' };
+    }
+    if (/[;{}]|function|window|document|eval|import|Constructor/i.test(trimmed)) {
+      return { ok: false, error: 'Biểu thức chứa từ khóa không hợp lệ.' };
+    }
+
+    // Trả về ngay từ bộ nhớ đệm nếu biểu thức đã được biên dịch trước đó
+    if (compiledCache[trimmed]) {
+      return compiledCache[trimmed];
+    }
+
+    var cleanFastKey = trimmed.replace(/\s+/g, '');
+    var FAST_MAP = {
+      'x^2': function(x) { return x * x; },
+      '2*x': function(x) { return 2 * x; },
+      'x^2-4': function(x) { return x * x - 4; },
+      'sin(x)': function(x) { return Math.sin(x); },
+      'cos(x)': function(x) { return Math.cos(x); },
+      'exp(-x)': function(x) { return Math.exp(-x); },
+      'exp(-x^2)': function(x) { return Math.exp(-x * x); },
+      'sqrt(x+1)': function(x) { return x >= -1 ? Math.sqrt(x + 1) : NaN; },
+      '1/(x^2+1)': function(x) { return 1 / (x * x + 1); },
+      '100+20*x': function(x) { return 100 + 20 * x; },
+      '3+x': function(x) { return 3 + x; },
+      '2*x+10': function(x) { return 2 * x + 10; },
+      '2+0.5*x': function(x) { return 2 + 0.5 * x; },
+      '15-2*x': function(x) { return 15 - 2 * x; },
+      'x-2': function(x) { return x - 2; },
+      '3*x^2-2*x+1': function(x) { return 3 * x * x - 2 * x + 1; },
+      '6+2*x': function(x) { return 6 + 2 * x; },
+      '10+3*x^2': function(x) { return 10 + 3 * x * x; }
+    };
+    if (FAST_MAP[cleanFastKey]) {
+      var fastObj = {
+        ok: true,
+        raw: trimmed,
+        normalized: trimmed,
+        tex: trimmed,
+        evalFn: FAST_MAP[cleanFastKey]
+      };
+      compiledCache[trimmed] = fastObj;
+      return fastObj;
+    }
+
+
+    if (typeof math === 'undefined') {
+      return { ok: false, error: 'Thư viện toán học Math.js đang tải, vui lòng thử lại sau giây lát.' };
+    }
+
+    var normalized = trimmed.replace(/\bln\s*\(/g, 'log(');
+
+    try {
+      var node = math.parse(normalized);
+      var compiled = node.compile();
+
+      // Sử dụng đối tượng sharedScope dùng chung để tránh cấp phát hàng nghìn Object trong vòng lặp
+      var evaluateAt = function(val) {
+        sharedScope.x = val;
+        sharedScope.t = val;
+        var res = compiled.evaluate(sharedScope);
+        if (typeof res === 'number' && isFinite(res)) {
+          return res;
+        }
+        return NaN;
+      };
+
+      evaluateAt(1.2345);
+
+      var texStr = '';
+      try {
+        texStr = node.toTex({ parenthesis: 'keep' });
+      } catch (texErr) {
+        texStr = trimmed;
+      }
+
+      var resultObj = {
+        ok: true,
+        raw: trimmed,
+        normalized: normalized,
+        tex: texStr,
+        evalFn: evaluateAt
+      };
+      compiledCache[trimmed] = resultObj;
+      return resultObj;
+    } catch (err) {
+      return {
+        ok: false,
+        error: 'Biểu thức toán học không hợp lệ. Ví dụ cú pháp đúng: 2*x, x^2 - 4, sin(x), exp(-x), sqrt(x+1).'
+      };
+    }
+  }
+
+  function detectElementaryAntiderivative(expr, varName) {
+    var v = varName || 'x';
+    var clean = expr.replace(/\s+/g, '');
+    var catalog = {
+      '2*x': { latex: v + '^2', desc: 'Nguyên hàm của 2' + v + ' là F(' + v + ') = ' + v + '².' },
+      'x^2': { latex: '\frac{' + v + '^3}{3}', desc: 'Nguyên hàm của ' + v + '² là F(' + v + ') = ' + v + '³/3.' },
+      'x^2-4': { latex: '\frac{' + v + '^3}{3} - 4' + v, desc: 'Nguyên hàm của ' + v + '² - 4 là F(' + v + ') = ' + v + '³/3 - 4' + v + '.' },
+      '100+20*x': { latex: '100' + v + ' + 10' + v + '^2', desc: 'Nguyên hàm của 100 + 20' + v + ' là F(' + v + ') = 100' + v + ' + 10' + v + '².' },
+      '3+x': { latex: '3' + v + ' + 0.5' + v + '^2', desc: 'Nguyên hàm của 3 + ' + v + ' là F(' + v + ') = 3' + v + ' + 0.5' + v + '².' },
+      '2*x+10': { latex: v + '^2 + 10' + v, desc: 'Nguyên hàm của 2' + v + ' + 10 là F(' + v + ') = ' + v + '² + 10' + v + '.' },
+      '2+0.5*x': { latex: '2' + v + ' + 0.25' + v + '^2', desc: 'Nguyên hàm của 2 + 0.5' + v + ' là F(' + v + ') = 2' + v + ' + 0.25' + v + '².' },
+      '15-2*x': { latex: '15' + v + ' - ' + v + '^2', desc: 'Nguyên hàm của 15 - 2' + v + ' là F(' + v + ') = 15' + v + ' - ' + v + '².' },
+      'sin(x)': { latex: '-\cos(' + v + ')', desc: 'Nguyên hàm của sin(' + v + ') là F(' + v + ') = -cos(' + v + ').' },
+      'cos(x)': { latex: '\sin(' + v + ')', desc: 'Nguyên hàm của cos(' + v + ') là F(' + v + ') = sin(' + v + ').' },
+      'exp(x)': { latex: 'e^{' + v + '}', desc: 'Nguyên hàm của e^' + v + ' là F(' + v + ') = e^' + v + '.' },
+      'exp(-x)': { latex: '-e^{-' + v + '}', desc: 'Nguyên hàm của e^(-' + v + ') là F(' + v + ') = -e^(-' + v + ').' }
+    };
+    return catalog[clean] || null;
+  }
+
+  function computeNumericalIntegral(evalFn, a, b, nIntervals) {
+    var N = parseInt(nIntervals, 10);
+    if (isNaN(N) || N < MIN_SUBINTERVALS) N = 160;
+    if (N > MAX_SUBINTERVALS) N = MAX_SUBINTERVALS;
+    if (N % 2 !== 0) N += 1;
+
+    if (a === b) {
+      return {
+        ok: true,
+        signedIntegral: 0,
+        geometricArea: 0,
+        positiveArea: 0,
+        negativeArea: 0,
+        nUsed: N,
+        undefinedCount: 0
+      };
+    }
+
+    var signFlip = 1;
+    var low = a;
+    var high = b;
+    if (a > b) {
+      signFlip = -1;
+      low = b;
+      high = a;
+    }
+
+    var h = (high - low) / N;
+    var signedSum = 0;
+    var absSum = 0;
+    var posArea = 0;
+    var negArea = 0;
+    var undefinedPoints = 0;
+
+    for (var i = 0; i < N; i++) {
+      var x0 = low + i * h;
+      var x1 = x0 + h;
+      var xm = 0.5 * (x0 + x1);
+
+      var y0 = evalFn(x0);
+      var ym = evalFn(xm);
+      var y1 = evalFn(x1);
+
+      if (!isFinite(y0)) y0 = evalFn(x0 + h * 1e-5);
+      if (!isFinite(y1)) y1 = evalFn(x1 - h * 1e-5);
+
+      if (!isFinite(y0) || !isFinite(ym) || !isFinite(y1) ||
+          Math.abs(y0) > Y_CLIP_LIMIT || Math.abs(ym) > Y_CLIP_LIMIT || Math.abs(y1) > Y_CLIP_LIMIT) {
+        undefinedPoints++;
+        continue;
+      }
+
+      var segSigned = (h / 6) * (y0 + 4 * ym + y1);
+      var segAbs = (h / 6) * (Math.abs(y0) + 4 * Math.abs(ym) + Math.abs(y1));
+
+      signedSum += segSigned;
+      absSum += segAbs;
+      if (segSigned >= 0) {
+        posArea += segSigned;
+      } else {
+        negArea += Math.abs(segSigned);
+      }
+    }
+
+    if (undefinedPoints > N * 0.25) {
+      return {
+        ok: false,
+        error: 'Hàm số không xác định hoặc có tiệm cận đứng (phân kỳ) trên phần lớn đoạn [' + a + ', ' + b + ']. Vui lòng kiểm tra tập xác định.'
+      };
+    }
+
+    return {
+      ok: true,
+      signedIntegral: signFlip * signedSum,
+      geometricArea: absSum,
+      positiveArea: posArea,
+      negativeArea: negArea,
+      nUsed: N,
+      undefinedCount: undefinedPoints
+    };
+  }
+
+  function generatePlotSamples(evalFn, a, b, mode, showAbs) {
+    var xMin = -5;
+    var xMax = 5;
+
+    if (mode === 'definite' && isFinite(a) && isFinite(b)) {
+      var low = Math.min(a, b);
+      var high = Math.max(a, b);
+      var span = Math.max(high - low, 2);
+      xMin = low - span * 0.25;
+      xMax = high + span * 0.25;
+    } else if (isFinite(a) && !isFinite(b)) {
+      xMin = a - 5;
+      xMax = a + 5;
+    } else if (!isFinite(a) && isFinite(b)) {
+      xMin = b - 5;
+      xMax = b + 5;
+    }
+
+    // Số điểm lấy mẫu tối ưu (160 điểm đường cong, 100 điểm tô miền) giúp đồ thị mượt mà không nặng SVG
+    var sampleCount = 160;
+    var step = (xMax - xMin) / sampleCount;
+    var xCurve = [];
+    var yCurve = [];
+    var yMinVal = Infinity;
+    var yMaxVal = -Infinity;
+
+    for (var i = 0; i <= sampleCount; i++) {
+      var x = xMin + i * step;
+      var y = evalFn(x);
+      if (isFinite(y) && Math.abs(y) <= 1e4) {
+        var val = showAbs ? Math.abs(y) : y;
+        xCurve.push(x);
+        yCurve.push(val);
+        if (val < yMinVal) yMinVal = val;
+        if (val > yMaxVal) yMaxVal = val;
+      } else {
+        xCurve.push(x);
+        yCurve.push(null);
+      }
+    }
+
+    var xFillPos = [];
+    var yFillPos = [];
+    var xFillNeg = [];
+    var yFillNeg = [];
+
+    if (mode === 'definite' && isFinite(a) && isFinite(b)) {
+      var fillLow = Math.min(a, b);
+      var fillHigh = Math.max(a, b);
+      var fillSteps = 100;
+      var fillH = (fillHigh - fillLow) / fillSteps;
+
+      for (var j = 0; j <= fillSteps; j++) {
+        var xf = fillLow + j * fillH;
+        var yf = evalFn(xf);
+        if (!isFinite(yf) || Math.abs(yf) > 1e4) {
+          xFillPos.push(xf); yFillPos.push(null);
+          xFillNeg.push(xf); yFillNeg.push(null);
+          continue;
+        }
+        if (showAbs) {
+          xFillPos.push(xf);
+          yFillPos.push(Math.abs(yf));
+        } else {
+          xFillPos.push(xf);
+          yFillPos.push(yf >= 0 ? yf : 0);
+          xFillNeg.push(xf);
+          yFillNeg.push(yf < 0 ? yf : 0);
+        }
+      }
+    }
+
+    var fa = isFinite(a) ? evalFn(a) : null;
+    var fb = isFinite(b) ? evalFn(b) : null;
+    if (showAbs) {
+      if (isFinite(fa)) fa = Math.abs(fa);
+      if (isFinite(fb)) fb = Math.abs(fb);
+    }
+
+    return {
+      xCurve: xCurve,
+      yCurve: yCurve,
+      xFillPos: xFillPos,
+      yFillPos: yFillPos,
+      xFillNeg: xFillNeg,
+      yFillNeg: yFillNeg,
+      xMin: xMin,
+      xMax: xMax,
+      yMinVal: yMinVal,
+      yMaxVal: yMaxVal,
+      fa: fa,
+      fb: fb
+    };
+  }
+
+  function formatNum(num, digits) {
+    if (num === null || num === undefined || !isFinite(num)) return '—';
+    var d = digits !== undefined ? digits : 4;
+    var factor = Math.pow(10, d);
+    var rounded = Math.round(num * factor) / factor;
+    return rounded.toLocaleString('vi-VN', { maximumFractionDigits: d });
+  }
+
+  /**
+   * Khoanh vùng biên dịch MathJax chỉ trong phần tử được chỉ định (không bao giờ quét toàn trang).
+   */
+  var mathJaxDebounce = null;
+  function typesetMath(elements) {
+    if (!elements) return;
+    var targetList = Array.isArray(elements) ? elements.filter(Boolean) : [elements];
+    if (targetList.length === 0) return;
+    if (mathJaxDebounce) clearTimeout(mathJaxDebounce);
+    mathJaxDebounce = setTimeout(function() {
+      if (window.MathJax && typeof window.MathJax.typesetPromise === 'function') {
+        if (typeof window.MathJax.typesetClear === 'function') {
+          window.MathJax.typesetClear(targetList);
+        }
+        window.MathJax.typesetPromise(targetList).catch(function() {});
+      }
+    }, 220);
+  }
+
+  // ============================================================================
+  // XỬ LÝ MÁY TÍNH TÍCH PHÂN (TRANG CHỦ & TRANG MÁY TÍNH)
+  // ============================================================================
+
+  function runAnalysis(prefix) {
+    var exprInput = document.getElementById(prefix + '-expr');
+    var aInput = document.getElementById(prefix + '-a');
+    var bInput = document.getElementById(prefix + '-b');
+    var nInput = document.getElementById(prefix + '-n');
+    var modeSelect = document.getElementById(prefix + '-mode');
+    var absCheckbox = document.getElementById(prefix + '-abs');
+    var statusEl = document.getElementById(prefix + '-status');
+
+    if (!exprInput) return;
+
+    var rawExpr = exprInput.value;
+    var rawA = aInput ? aInput.value.trim() : '';
+    var rawB = bInput ? bInput.value.trim() : '';
+    var nVal = nInput ? parseInt(nInput.value, 10) : 160;
+    var selectedMode = modeSelect ? modeSelect.value : 'definite';
+    var showAbs = absCheckbox ? absCheckbox.checked : false;
+
+    hideStatus(statusEl);
+
+    var compiled = compileSafeExpression(rawExpr);
+    if (!compiled.ok) {
+      showStatus(statusEl, compiled.error, 'error');
+      return;
+    }
+
+    var hasBothBounds = (rawA !== '' && rawB !== '' && !isNaN(Number(rawA)) && !isNaN(Number(rawB)));
+    var a = hasBothBounds ? Number(rawA) : NaN;
+    var b = hasBothBounds ? Number(rawB) : NaN;
+
+    var effectiveMode = (selectedMode === 'explore' || !hasBothBounds) ? 'explore' : 'definite';
+
+    if (selectedMode === 'definite' && !hasBothBounds) {
+      showStatus(
+        statusEl,
+        'Bạn chưa nhập đủ hai cận a và b. Hệ thống chuyển sang chế độ "Khảo sát hàm số và xem đồ thị" (không hiển thị giá trị tích phân xác định).',
+        'info'
+      );
+    }
+
+    var plotData = generatePlotSamples(compiled.evalFn, a, b, effectiveMode, showAbs);
+
+    var validPoints = plotData.yCurve.filter(function(v) { return v !== null && isFinite(v); }).length;
+    if (validPoints === 0) {
+      showStatus(statusEl, 'Hàm số không xác định trên miền khảo sát hiện tại. Vui lòng kiểm tra điều kiện xác định (ví dụ: mẫu số khác 0, biểu thức trong căn/log dương).', 'error');
+      return;
+    }
+
+    IntegralGraph.renderFunctionPlot(prefix + '-plot', {
+      xCurve: plotData.xCurve,
+      yCurve: plotData.yCurve,
+      xFillPos: plotData.xFillPos,
+      yFillPos: plotData.yFillPos,
+      xFillNeg: plotData.xFillNeg,
+      yFillNeg: plotData.yFillNeg,
+      a: a,
+      b: b,
+      fa: plotData.fa,
+      fb: plotData.fb,
+      mode: effectiveMode,
+      showAbs: showAbs,
+      exprText: compiled.raw,
+      variable: 'x',
+      title: effectiveMode === 'definite'
+        ? ('Đồ thị y = ' + (showAbs ? '|' + compiled.raw + '|' : compiled.raw) + ' trên đoạn [' + a + ', ' + b + ']')
+        : ('Khảo sát đồ thị hàm số y = ' + compiled.raw)
+    });
+
+    if (effectiveMode === 'explore') {
+      renderExploreResult(prefix, compiled, plotData);
+      return;
+    }
+
+    var calcResult = computeNumericalIntegral(compiled.evalFn, a, b, nVal);
+    if (!calcResult.ok) {
+      showStatus(statusEl, calcResult.error, 'error');
+      return;
+    }
+
+    if (calcResult.undefinedCount > 0) {
+      showStatus(
+        statusEl,
+        'Lưu ý: Phát hiện ' + calcResult.undefinedCount + ' điểm gần biên/điểm gián đoạn trên đoạn [' + a + ', ' + b + ']. Kết quả được xấp xỉ số qua các lân cận xác định.',
+        'info'
+      );
+    }
+
+    renderDefiniteResult(prefix, compiled, a, b, calcResult, showAbs);
+
+    recordHistoryItem({
+      actionType: 'CALCULATE',
+      expression: compiled.raw,
+      lowerBound: a,
+      upperBound: b,
+      signedIntegral: calcResult.signedIntegral,
+      geometricArea: calcResult.geometricArea,
+      note: 'Máy tính tích phân (' + prefix + ')'
+    });
+  }
+
+  function renderExploreResult(prefix, compiled, plotData) {
+    var signedEl = document.getElementById(prefix + '-res-signed');
+    var areaEl = document.getElementById(prefix + '-res-area');
+    var formulaEl = document.getElementById(prefix + '-res-formula');
+    var meaningEl = document.getElementById(prefix + '-res-meaning');
+    var stepsContainer = document.getElementById(prefix + '-steps-box');
+
+    if (signedEl) signedEl.textContent = 'Chế độ khảo sát';
+    if (areaEl) areaEl.textContent = '[' + formatNum(plotData.xMin, 2) + '; ' + formatNum(plotData.xMax, 2) + ']';
+    if (formulaEl) {
+      formulaEl.innerHTML = '$$y = f(x) = ' + compiled.tex + '$$';
+    }
+    var y0 = compiled.evalFn(0);
+    if (meaningEl) {
+      meaningEl.innerHTML =
+        '<strong>Chế độ khảo sát hàm số:</strong> Bạn đang xem hình dáng đồ thị $y = ' + compiled.tex + '$ trên miền $[' +
+        formatNum(plotData.xMin, 1) + ', ' + formatNum(plotData.xMax, 1) + ']$. ' +
+        'Giá trị nhỏ nhất quan sát được $\approx ' + formatNum(plotData.yMinVal, 3) + '$, giá trị lớn nhất $\approx ' +
+        formatNum(plotData.yMaxVal, 3) + '$' +
+        (isFinite(y0) ? (', giao điểm với trục tung tại $(0; ' + formatNum(y0, 3) + ')$.') : '.') +
+        ' Nhập đủ hai cận $a, b$ và chọn chế độ "Tích phân xác định" để tính diện tích và tích phân.';
+    }
+    if (stepsContainer) {
+      stepsContainer.innerHTML =
+        '<ul class="steps-list">' +
+        '<li><strong>Hàm số khảo sát:</strong> $f(x) = ' + compiled.tex + '$.</li>' +
+        '<li><strong>Trạng thái cận:</strong> Chưa áp dụng hai cận xác định — hệ thống không tự gán giá trị tích phân xác định.</li>' +
+        '<li><strong>Hướng dẫn:</strong> Nhập cận dưới $a$, cận trên $b$ và chuyển sang chế độ <em>A. Tích phân xác định</em> để xem giải thích từng bước.</li>' +
+        '</ul>';
+    }
+    typesetMath([formulaEl, meaningEl, stepsContainer]);
+  }
+
+  function renderDefiniteResult(prefix, compiled, a, b, calcResult, showAbs) {
+    var signedEl = document.getElementById(prefix + '-res-signed');
+    var areaEl = document.getElementById(prefix + '-res-area');
+    var formulaEl = document.getElementById(prefix + '-res-formula');
+    var meaningEl = document.getElementById(prefix + '-res-meaning');
+    var stepsContainer = document.getElementById(prefix + '-steps-box');
+
+    if (signedEl) signedEl.textContent = formatNum(calcResult.signedIntegral, 5);
+    if (areaEl) areaEl.textContent = formatNum(calcResult.geometricArea, 5) + ' đvdt';
+
+    if (formulaEl) {
+      formulaEl.innerHTML =
+        '$$I = \int_{' + a + '}^{' + b + '} \left(' + compiled.tex + '\right) dx \approx ' +
+        formatNum(calcResult.signedIntegral, 4) +
+        '\quad | \quad S = \int_{' + a + '}^{' + b + '} \left|' + compiled.tex + '\right| dx \approx ' +
+        formatNum(calcResult.geometricArea, 4) + '$$';
+    }
+
+    var hasNegativePart = calcResult.negativeArea > 1e-5;
+    if (meaningEl) {
+      if (hasNegativePart) {
+        meaningEl.innerHTML =
+          '<strong>Phân biệt Tích phân có dấu và Diện tích hình học:</strong> Trên đoạn $[' + a + ', ' + b + ']$, ' +
+          'phần đồ thị nằm phía trên trục hoành đóng góp <strong>+' + formatNum(calcResult.positiveArea, 4) + '</strong>, ' +
+          'trong khi phần nằm phía dưới trục hoành đóng góp âm <strong>-' + formatNum(calcResult.negativeArea, 4) + '</strong>. ' +
+          'Do đó tích phân xác định (tổng đại số có dấu) là <strong>' + formatNum(calcResult.signedIntegral, 4) + '</strong>, ' +
+          'còn diện tích hình học phẳng thực tế $\int_{' + a + '}^{' + b + '} |f(x)|\,dx$ là <strong>' +
+          formatNum(calcResult.geometricArea, 4) + ' đvdt</strong>.';
+      } else {
+        meaningEl.innerHTML =
+          '<strong>Ý nghĩa hình học:</strong> Trên toàn đoạn $[' + a + ', ' + b + ']$, hàm số không âm ($f(x) \ge 0$) nên ' +
+          'tích phân xác định trùng khít với diện tích hình phẳng giới hạn bởi đồ thị $y = f(x)$, trục hoành $Ox$ và hai đường thẳng $x = ' +
+          a + ', x = ' + b + '$, bằng <strong>' + formatNum(calcResult.geometricArea, 4) + ' đvdt</strong>.';
+      }
+    }
+
+    if (stepsContainer) {
+      var elemAnti = detectElementaryAntiderivative(compiled.normalized, 'x');
+      var methodHtml = '';
+      var stepCalcHtml = '';
+
+      if (elemAnti && !showAbs) {
+        methodHtml = 'Giải tích (Công thức Newton–Leibniz kết hợp kiểm chứng số Simpson 1/3 với $N = ' + calcResult.nUsed + '$ khoảng chia).';
+        stepCalcHtml =
+          '<li><strong>Tìm nguyên hàm sơ cấp:</strong> ' + elemAnti.desc + ' Biểu thức nguyên hàm: $F(x) = ' + elemAnti.latex + '$.</li>' +
+          '<li><strong>Thế cận Newton–Leibniz:</strong> $I = F(' + b + ') - F(' + a + ') = ' + formatNum(calcResult.signedIntegral, 5) + '$.</li>';
+      } else {
+        methodHtml = 'Phương pháp xấp xỉ số <strong>Composite Simpson 1/3</strong> với $N = ' + calcResult.nUsed + '$ khoảng chia đều (giá trị gần đúng).';
+        stepCalcHtml =
+          '<li><strong>Nhận xét nguyên hàm:</strong> Biểu thức thuộc dạng tổng quát hoặc không có nguyên hàm sơ cấp đơn giản. Hệ thống không tự bịa biến đổi đại số mà tính trực tiếp bằng phương pháp giải tích số.</li>' +
+          '<li><strong>Chia nhỏ miền tích phân:</strong> Chia đoạn $[' + a + ', ' + b + ']$ thành $N = ' + calcResult.nUsed + '$ khoảng có bước nhảy $h = \frac{' + b + ' - (' + a + ')}{' + calcResult.nUsed + '} = ' + formatNum((b - a) / calcResult.nUsed, 5) + '$.</li>' +
+          '<li><strong>Xấp xỉ parabol từng đoạn:</strong> Áp dụng công thức $\frac{h}{6}[f(x_i) + 4f(x_{m}) + f(x_{i+1})]$ trên từng đoạn con để hội tụ về kết quả.</li>';
+      }
+
+      stepsContainer.innerHTML =
+        '<ul class="steps-list">' +
+        '<li><strong>Hàm số đầu vào:</strong> $f(x) = ' + compiled.tex + '$ &nbsp;|&nbsp; <strong>Cận tích phân:</strong> $a = ' + a + ',\; b = ' + b + '$.</li>' +
+        '<li><strong>Công thức tích phân:</strong> $I = \int_{' + a + '}^{' + b + '} \left(' + compiled.tex + '\right) dx$.</li>' +
+        '<li><strong>Phương pháp tính:</strong> ' + methodHtml + '</li>' +
+        stepCalcHtml +
+        '<li><strong>Kết quả cuối cùng:</strong> Tích phân xác định có dấu $I \approx <strong>' + formatNum(calcResult.signedIntegral, 5) + '</strong>$; ' +
+        'Diện tích hình học phẳng $S = \int_{' + a + '}^{' + b + '} |f(x)|\,dx \approx <strong>' + formatNum(calcResult.geometricArea, 5) + '</strong>$ (đơn vị diện tích).</li>' +
+        '<li><strong>Ý nghĩa trong ngữ cảnh:</strong> Tích phân xác định biểu diễn độ biến thiên ròng (có xét dấu âm/dương), trong khi tích phân của $|f(x)|$ biểu diễn tổng diện tích hình học phẳng.</li>' +
+        '</ul>';
+    }
+
+    typesetMath([formulaEl, meaningEl, stepsContainer]);
+  }
+
+  function showStatus(el, msg, type) {
+    if (!el) return;
+    el.textContent = msg;
+    el.className = 'status-banner ' + (type || 'info');
+  }
+
+  function hideStatus(el) {
+    if (!el) return;
+    el.textContent = '';
+    el.className = 'status-banner';
+  }
+
+  // ============================================================================
+  // QUẢN LÝ 7 ỨNG DỤNG THỰC TẾ (A -> G) VÀ TƯƠNG TÁC ĐẦY ĐỦ 5 NÚT
+  // ============================================================================
+
+  function getApplicationsList() {
+    var list = (state.examples && state.examples.length > 0 ? state.examples : FALLBACK_EXAMPLES);
+    return list.filter(function(item) { return item.isApplication; });
+  }
+
+  function renderHomeFeaturedApps() {
+    var container = document.getElementById('home-featured-apps');
+    if (!container) return;
+    var apps = getApplicationsList();
+    var html = '';
+    for (var i = 0; i < apps.length; i++) {
+      var app = apps[i];
+      html +=
+        '<div class="app-card">' +
+          '<div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.45rem;">' +
+              '<span class="badge badge-blue">Chủ đề ' + app.code + ' • ' + app.category + '</span>' +
+              '<span style="font-size:0.78rem;color:var(--text-muted);">Đơn vị: ' + app.unit + '</span>' +
+            '</div>' +
+            '<h3 style="font-size:1rem;font-weight:700;margin-bottom:0.35rem;">' + app.title + '</h3>' +
+            '<p style="font-size:0.86rem;color:var(--text-secondary);margin-bottom:0.5rem;">' + app.situation + '</p>' +
+            '<div class="box-input-data" style="margin-bottom:0.5rem;">' +
+              '<strong>Dữ kiện:</strong> ' + app.dataDesc + '<br>' +
+              '<strong>Kết quả chuẩn:</strong> ' + formatNum(app.expectedResult, 4) + ' ' + app.unit +
+            '</div>' +
+          '</div>' +
+          '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">' +
+            '<button type="button" class="btn btn-primary btn-sm" data-action="open-app-detail" data-id="' + app.id + '">Khám phá & Tương tác</button>' +
+            '<button type="button" class="btn btn-secondary btn-sm" data-action="load-to-calc" data-id="' + app.id + '">Đưa vào Máy tính</button>' +
+          '</div>' +
+        '</div>';
+    }
+    container.innerHTML = html;
+  }
+
+  function renderApplicationsPage() {
+    var listContainer = document.getElementById('apps-cards-container');
+    if (!listContainer) return;
+    var apps = getApplicationsList();
+    var html = '';
+
+    for (var i = 0; i < apps.length; i++) {
+      var app = apps[i];
+      var custom = state.customAppParams[app.id] || {
+        expr: app.expr,
+        a: app.a,
+        b: app.b,
+        initialValue: app.initialValue || 0
+      };
+
+      var compiled = compileSafeExpression(custom.expr);
+      var integralVal = 0;
+      if (compiled.ok) {
+        var res = computeNumericalIntegral(compiled.evalFn, Number(custom.a), Number(custom.b), 120);
+        if (res.ok) integralVal = res.signedIntegral;
+      }
+      var totalResult = Number(custom.initialValue || 0) + integralVal;
+      var v = app.variable || 't';
+      var shownFormula = custom.expr.replace(/\bx\b/g, v);
+
+      var similar = state.similarProblems[app.id] || null;
+
+      html +=
+        '<div class="app-card" id="card-' + app.id + '">' +
+          '<div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem;">' +
+              '<span class="badge badge-blue">' + app.category + '</span>' +
+              '<span class="badge badge-teal">' + app.difficulty + '</span>' +
+            '</div>' +
+            '<h3 style="font-size:1.05rem;font-weight:700;margin-bottom:0.35rem;">' + app.title + '</h3>' +
+            '<p style="font-size:0.88rem;color:var(--text-secondary);margin-bottom:0.45rem;"><strong>Tình huống:</strong> ' + app.situation + '</p>' +
+            '<p style="font-size:0.88rem;color:var(--text-primary);margin-bottom:0.5rem;"><strong>Câu hỏi:</strong> ' + app.question + '</p>' +
+
+            '<div class="data-vs-calc">' +
+              '<div class="box-input-data">' +
+                '<div style="font-weight:700;color:var(--primary);margin-bottom:0.2rem;">DỮ KIỆN ĐẦU VÀO</div>' +
+                '<div>Hàm tốc độ/biên: <code>' + shownFormula + '</code> (' + (app.rateUnit || 'đv') + ')</div>' +
+                '<div>Miền tính: <code>[' + custom.a + ', ' + custom.b + ']</code> (' + (app.timeUnit || 'đv') + ')</div>' +
+                (Number(custom.initialValue) !== 0 ? '<div>Giá trị ban đầu: <code>' + custom.initialValue + ' ' + app.unit + '</code></div>' : '') +
+              '</div>' +
+              '<div class="box-calc-result">' +
+                '<div style="font-weight:700;color:var(--success);margin-bottom:0.2rem;">KẾT QUẢ TÍNH TOÁN</div>' +
+                '<div>Lượng tích lũy: <strong>' + formatNum(integralVal, 4) + ' ' + app.unit + '</strong></div>' +
+                '<div style="font-size:0.95rem;margin-top:0.15rem;">Tổng cộng: <strong>' + formatNum(totalResult, 4) + ' ' + app.unit + '</strong></div>' +
+              '</div>' +
+            '</div>' +
+
+            '<div style="font-size:0.86rem;color:var(--text-secondary);background:var(--bg-subtle);padding:0.55rem 0.75rem;border-radius:6px;margin-top:0.45rem;">' +
+              '<strong>Ý nghĩa thực tế:</strong> ' + app.meaning +
+            '</div>' +
+
+            '<div class="app-actions" style="margin-top:0.75rem;">' +
+              '<button type="button" class="btn btn-primary btn-sm" data-action="app-view-graph" data-id="' + app.id + '">1. Xem đồ thị</button>' +
+              '<button type="button" class="btn btn-secondary btn-sm" data-action="app-toggle-panel" data-id="' + app.id + '" data-panel="steps">2. Giải từng bước</button>' +
+              '<button type="button" class="btn btn-secondary btn-sm" data-action="app-toggle-panel" data-id="' + app.id + '" data-panel="edit">3. Thử thay đổi dữ kiện</button>' +
+              '<button type="button" class="btn btn-outline btn-sm" data-action="app-generate-similar" data-id="' + app.id + '">4. Làm bài tương tự</button>' +
+              '<button type="button" class="btn btn-outline btn-sm" data-action="app-toggle-panel" data-id="' + app.id + '" data-panel="check">5. Kiểm tra đáp án</button>' +
+            '</div>' +
+
+            '<div id="panel-steps-' + app.id + '" class="interactive-panel">' +
+              '<div style="font-weight:700;margin-bottom:0.4rem;color:var(--primary);">Lời giải từng bước theo dữ kiện hiện tại:</div>' +
+              '<ul class="steps-list">' +
+                '<li><strong>Mô hình tích phân:</strong> Giá trị cần tìm $= ' + (Number(custom.initialValue) ? custom.initialValue + ' + ' : '') + '\int_{' + custom.a + '}^{' + custom.b + '} (' + shownFormula + ')\,d' + v + '$.</li>' +
+                '<li><strong>Tính lượng tích lũy trên đoạn [' + custom.a + ', ' + custom.b + ']:</strong> Giá trị tích phân $= ' + formatNum(integralVal, 4) + '\text{ ' + app.unit + '}$.</li>' +
+                (Number(custom.initialValue) ? '<li><strong>Cộng giá trị cố định ban đầu:</strong> $' + custom.initialValue + ' + ' + formatNum(integralVal, 4) + ' = ' + formatNum(totalResult, 4) + '\text{ ' + app.unit + '}$.</li>' : '') +
+                '<li><strong>Kết luận thực tế:</strong> Kết quả đạt <strong>' + formatNum(totalResult, 4) + ' ' + app.unit + '</strong>.</li>' +
+              '</ul>' +
+            '</div>' +
+
+            '<div id="panel-edit-' + app.id + '" class="interactive-panel">' +
+              '<div style="font-weight:700;margin-bottom:0.5rem;">Thay đổi dữ kiện đầu vào (sử dụng biến x hoặc t):</div>' +
+              '<div class="form-group">' +
+                '<label class="form-label">Biểu thức tốc độ / hàm biên:</label>' +
+                '<input type="text" id="edit-expr-' + app.id + '" class="form-input" value="' + custom.expr + '">' +
+              '</div>' +
+              '<div class="form-row-2" style="margin-bottom:0.6rem;">' +
+                '<div>' +
+                  '<label class="form-label">Cận dưới a:</label>' +
+                  '<input type="number" step="any" id="edit-a-' + app.id + '" class="form-input" value="' + custom.a + '">' +
+                '</div>' +
+                '<div>' +
+                  '<label class="form-label">Cận trên b:</label>' +
+                  '<input type="number" step="any" id="edit-b-' + app.id + '" class="form-input" value="' + custom.b + '">' +
+                '</div>' +
+              '</div>' +
+              '<div class="form-group">' +
+                '<label class="form-label">Giá trị ban đầu (nếu có, ví dụ chi phí cố định):</label>' +
+                '<input type="number" step="any" id="edit-init-' + app.id + '" class="form-input" value="' + custom.initialValue + '">' +
+              '</div>' +
+              '<div style="display:flex;gap:0.5rem;">' +
+                '<button type="button" class="btn btn-primary btn-sm" data-action="app-apply-custom" data-id="' + app.id + '">Cập nhật mô hình & Đồ thị</button>' +
+                '<button type="button" class="btn btn-secondary btn-sm" data-action="app-reset-custom" data-id="' + app.id + '">Khôi phục gốc</button>' +
+              '</div>' +
+            '</div>' +
+
+            '<div id="panel-check-' + app.id + '" class="interactive-panel ' + (similar ? 'open' : '') + '">' +
+              '<div style="font-weight:700;margin-bottom:0.35rem;color:var(--teal);">' +
+                (similar ? 'Bài toán tương tự đang kích hoạt:' : 'Kiểm tra đáp án cho bài toán hiện tại:') +
+              '</div>' +
+              '<p style="font-size:0.86rem;margin-bottom:0.5rem;">' +
+                (similar ? similar.prompt : ('Tính kết quả của mô hình hiện tại với biểu thức ' + shownFormula + ' trên đoạn [' + custom.a + ', ' + custom.b + ']' + (Number(custom.initialValue) ? (' và giá trị ban đầu ' + custom.initialValue) : '') + '.')) +
+              '</p>' +
+              '<div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">' +
+                '<input type="number" step="any" id="check-ans-' + app.id + '" class="form-input" style="max-width:180px;" placeholder="Nhập đáp án (' + app.unit + ')">' +
+                '<button type="button" class="btn btn-primary btn-sm" data-action="app-verify-answer" data-id="' + app.id + '">Kiểm tra đáp án</button>' +
+              '</div>' +
+              '<div id="check-feedback-' + app.id + '" style="margin-top:0.5rem;font-size:0.86rem;"></div>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+    }
+
+    listContainer.innerHTML = html;
+    renderApplicationSpotlightPlot(state.activeApplicationId);
+  }
+
+  function renderApplicationSpotlightPlot(appId) {
+    var apps = getApplicationsList();
+    var target = null;
+    for (var i = 0; i < apps.length; i++) {
+      if (apps[i].id === appId) {
+        target = apps[i];
+        break;
+      }
+    }
+    if (!target) target = apps[0];
+    if (!target) return;
+
+    state.activeApplicationId = target.id;
+    var custom = state.customAppParams[target.id] || {
+      expr: target.expr,
+      a: target.a,
+      b: target.b,
+      initialValue: target.initialValue || 0
+    };
+
+    var compiled = compileSafeExpression(custom.expr);
+    if (!compiled.ok) return;
+
+    var a = Number(custom.a);
+    var b = Number(custom.b);
+    var res = computeNumericalIntegral(compiled.evalFn, a, b, 120);
+    var plotSamples = generatePlotSamples(compiled.evalFn, a, b, 'definite', false);
+    var v = target.variable || 't';
+    var formulaDisplay = custom.expr.replace(/\bx\b/g, v);
+
+    var titleEl = document.getElementById('app-spotlight-title');
+    var summaryEl = document.getElementById('app-spotlight-summary');
+    var totalVal = Number(custom.initialValue || 0) + (res.ok ? res.signedIntegral : 0);
+
+    if (titleEl) {
+      titleEl.textContent = 'Đồ thị mô hình: ' + target.title;
+    }
+    if (summaryEl) {
+      summaryEl.innerHTML =
+        'Hàm tốc độ/biên: <strong>' + formulaDisplay + '</strong> (' + (target.rateUnit || 'đv') + ') &nbsp;|&nbsp; ' +
+        'Đoạn tính: <strong>[' + a + ', ' + b + ']</strong> (' + (target.timeUnit || 'đv') + ') &nbsp;|&nbsp; ' +
+        'Kết quả: <strong>' + formatNum(totalVal, 4) + ' ' + target.unit + '</strong>';
+    }
+
+    IntegralGraph.renderFunctionPlot('app-spotlight-plot', {
+      xCurve: plotSamples.xCurve,
+      yCurve: plotSamples.yCurve,
+      xFillPos: plotSamples.xFillPos,
+      yFillPos: plotSamples.yFillPos,
+      xFillNeg: plotSamples.xFillNeg,
+      yFillNeg: plotSamples.yFillNeg,
+      a: a,
+      b: b,
+      fa: plotSamples.fa,
+      fb: plotSamples.fb,
+      mode: 'definite',
+      showAbs: false,
+      exprText: formulaDisplay,
+      variable: v,
+      xLabel: 'Biến ' + v + (target.timeUnit ? ' (' + target.timeUnit + ')' : ''),
+      yLabel: (target.rateUnit ? target.rateUnit : 'f(' + v + ')'),
+      title: target.title + ' — Kết quả: ' + formatNum(totalVal, 4) + ' ' + target.unit
+    });
+  }
+
+  function generateSimilarAppProblem(appId) {
+    var templates = {
+      'app-physics-distance': [
+        { expr: '3*x', a: 0, b: 6, init: 0, expected: 54, prompt: 'Một xe điện tăng tốc với vận tốc v(t) = 3t (m/s). Tính quãng đường xe đi được trong 6 giây đầu tiên (m).' },
+        { expr: '4 + 2*x', a: 0, b: 5, init: 0, expected: 45, prompt: 'Một vật chuyển động với vận tốc v(t) = 4 + 2t (m/s). Tính quãng đường vật đi được từ t = 0 đến t = 5 giây (m).' }
+      ],
+      'app-production-output': [
+        { expr: '80 + 15*x', a: 0, b: 6, init: 0, expected: 750, prompt: 'Dây chuyền lắp ráp có tốc độ r(t) = 80 + 15t (sản phẩm/giờ). Tính tổng sản lượng trong 6 giờ đầu (sản phẩm).' },
+        { expr: '120 + 10*x', a: 0, b: 10, init: 0, expected: 1700, prompt: 'Nhà máy vận hành với tốc độ r(t) = 120 + 10t (sản phẩm/giờ). Tính tổng số sản phẩm trong 10 giờ.' }
+      ],
+      'app-water-supply': [
+        { expr: '5 + 2*x', a: 0, b: 8, init: 0, expected: 104, prompt: 'Lưu lượng nước chảy qua ống là q(t) = 5 + 2t (lít/phút). Tính tổng lượng nước chảy qua trong 8 phút (lít).' },
+        { expr: '4 + 0.5*x', a: 0, b: 12, init: 0, expected: 84, prompt: 'Lưu lượng nước cấp vào bể là q(t) = 4 + 0.5t (lít/phút). Tính tổng thể tích nước sau 12 phút (lít).' }
+      ],
+      'app-business-cost': [
+        { expr: '4*x + 20', a: 0, b: 15, init: 300, expected: 1050, prompt: "Chi phí biên C'(x) = 4x + 20 (nghìn đồng/SP) và chi phí cố định ban đầu là 300 nghìn đồng. Tính tổng chi phí khi sản xuất 15 sản phẩm (nghìn đồng)." },
+        { expr: '2*x + 5', a: 0, b: 30, init: 400, expected: 1450, prompt: "Chi phí biên C'(x) = 2x + 5 (nghìn đồng/SP), chi phí cố định 400 nghìn đồng. Tính tổng chi phí khi sản xuất 30 sản phẩm." }
+      ],
+      'app-power-energy': [
+        { expr: '3 + 0.8*x', a: 0, b: 5, init: 0, expected: 25, prompt: 'Công suất tiêu thụ P(t) = 3 + 0.8t (kW). Tính tổng điện năng tiêu thụ trong 5 giờ (kWh).' },
+        { expr: '1.5 + 0.5*x', a: 0, b: 6, init: 0, expected: 18, prompt: 'Công suất máy lạnh P(t) = 1.5 + 0.5t (kW). Tính điện năng tiêu thụ sau 6 giờ hoạt động (kWh).' }
+      ],
+      'app-construction-area': [
+        { expr: '0.5*x^2', a: 0, b: 6, init: 0, expected: 36, prompt: 'Tính diện tích mặt cắt giới hạn bởi đường cong f(x) = 0.5x² và trục hoành trên đoạn [0, 6] (m²).' },
+        { expr: 'x^2 + 1', a: 0, b: 3, init: 0, expected: 12, prompt: 'Tính diện tích mặt cắt dưới đồ thị f(x) = x² + 1 từ x = 0 đến x = 3 (m²).' }
+      ],
+      'app-biomed-infusion': [
+        { expr: '20 - 2*x', a: 0, b: 5, init: 0, expected: 75, prompt: '(Mô hình giả định) Tốc độ truyền chất r(t) = 20 - 2t (mg/giờ) trong 5 giờ. Tính tổng lượng chất được đưa vào hệ thống (mg).' },
+        { expr: '12 - 1.5*x', a: 0, b: 4, init: 0, expected: 36, prompt: '(Mô hình giả định) Tốc độ đưa chất r(t) = 12 - 1.5t (mg/giờ) từ t = 0 đến t = 4 giờ. Tính tổng lượng chất tích lũy (mg).' }
+      ]
+    };
+
+    var list = templates[appId] || templates['app-physics-distance'];
+    var current = state.similarProblems[appId];
+    var pick = list[0];
+    if (current && current.prompt === list[0].prompt && list.length > 1) {
+      pick = list[1];
+    }
+    state.similarProblems[appId] = pick;
+    renderApplicationsPage();
+  }
+
+  // ============================================================================
+  // THƯ VIỆN BÀI TOÁN (TRANG 4) & BÀI TẬP LUYỆN TẬP (TRANG 5)
+  // ============================================================================
+
+  function renderLibraryPage() {
+    var tbody = document.getElementById('library-table-body');
+    var filterCat = document.getElementById('lib-filter-category');
+    var searchBox = document.getElementById('lib-search-input');
+    if (!tbody) return;
+
+    var catVal = filterCat ? filterCat.value : 'all';
+    var keyword = searchBox ? searchBox.value.trim().toLowerCase() : '';
+    var items = state.examples.length > 0 ? state.examples : FALLBACK_EXAMPLES;
+
+    var filtered = items.filter(function(item) {
+      var matchCat = (catVal === 'all') || (item.category === catVal);
+      var matchKw = !keyword ||
+        item.title.toLowerCase().indexOf(keyword) !== -1 ||
+        item.category.toLowerCase().indexOf(keyword) !== -1 ||
+        item.expr.toLowerCase().indexOf(keyword) !== -1;
+      return matchCat && matchKw;
+    });
+
+    var html = '';
+    for (var i = 0; i < filtered.length; i++) {
+      var it = filtered[i];
+      html +=
+        '<tr>' +
+          '<td><span class="badge badge-blue">' + it.category + '</span></td>' +
+          '<td><strong>' + it.title + '</strong><div style="font-size:0.8rem;color:var(--text-muted);">' + it.question + '</div></td>' +
+          '<td><code>' + it.displayExpr + '</code></td>' +
+          '<td><code>[' + it.a + ', ' + it.b + ']</code></td>' +
+          '<td><strong>' + formatNum(it.expectedResult, 4) + ' ' + (it.unit || '') + '</strong></td>' +
+          '<td>' +
+            '<div style="display:flex;gap:0.4rem;">' +
+              '<button type="button" class="btn btn-primary btn-sm" data-action="load-to-calc" data-id="' + it.id + '">Mở trong Máy tính</button>' +
+              '<button type="button" class="btn btn-secondary btn-sm" data-action="view-lib-detail" data-id="' + it.id + '">Chi tiết</button>' +
+            '</div>' +
+          '</td>' +
+        '</tr>';
+    }
+
+    if (filtered.length === 0) {
+      html = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:1.5rem;">Không tìm thấy bài toán phù hợp với bộ lọc.</td></tr>';
+    }
+    tbody.innerHTML = html;
+  }
+
+  function showLibraryDetail(id) {
+    var box = document.getElementById('library-detail-box');
+    if (!box) return;
+    var items = state.examples.length > 0 ? state.examples : FALLBACK_EXAMPLES;
+    var found = null;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].id === id) { found = items[i]; break; }
+    }
+    if (!found) return;
+
+    var stepsHtml = (found.steps || []).map(function(s) {
+      return '<li>' + s + '</li>';
+    }).join('');
+
+    box.style.display = 'block';
+    box.innerHTML =
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">' +
+        '<h3 style="font-size:1.05rem;font-weight:700;color:var(--primary);">Chi tiết bài toán: ' + found.title + '</h3>' +
+        '<button type="button" class="btn btn-secondary btn-sm" data-action="close-lib-detail">Đóng</button>' +
+      '</div>' +
+      '<p style="font-size:0.9rem;margin-bottom:0.4rem;"><strong>Tình huống:</strong> ' + found.situation + '</p>' +
+      '<p style="font-size:0.9rem;margin-bottom:0.4rem;"><strong>Dữ kiện:</strong> ' + found.dataDesc + ' &nbsp;|&nbsp; <strong>Mô hình:</strong> $' + found.modelLatex + '$</p>' +
+      '<p style="font-size:0.9rem;margin-bottom:0.5rem;"><strong>Ý nghĩa:</strong> ' + found.meaning + '</p>' +
+      '<ul class="steps-list">' + stepsHtml + '</ul>';
+    typesetMath(box);
+  }
+
+  function renderExercisesPage() {
+    var container = document.getElementById('exercises-list-container');
+    if (!container) return;
+
+    var filtered = PRACTICE_EXERCISES.filter(function(ex) {
+      return state.exerciseLevel === 'all' || ex.level === state.exerciseLevel;
+    });
+
+    var html = '';
+    for (var i = 0; i < filtered.length; i++) {
+      var ex = filtered[i];
+      var subState = state.exerciseSubmitted[ex.id] || null;
+      var badgeClass = ex.level === 'Cơ bản' ? 'badge-teal' : (ex.level === 'Trung bình' ? 'badge-blue' : 'badge-amber');
+
+      html +=
+        '<div class="card" style="margin-bottom:1rem;">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.45rem;">' +
+            '<span class="badge ' + badgeClass + '">Cấp độ: ' + ex.level + '</span>' +
+            '<button type="button" class="btn btn-secondary btn-sm" data-action="ex-plot-preview" data-id="' + ex.id + '">Xem đồ thị gợi ý trên Máy tính</button>' +
+          '</div>' +
+          '<h3 style="font-size:1rem;font-weight:700;margin-bottom:0.4rem;">' + ex.title + '</h3>' +
+          '<p style="font-size:0.92rem;color:var(--text-primary);margin-bottom:0.65rem;">' + ex.prompt + '</p>' +
+          '<div style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap;">' +
+            '<input type="number" step="any" id="ex-input-' + ex.id + '" class="form-input" style="max-width:210px;" placeholder="Nhập đáp án số' + (ex.unit ? ' (' + ex.unit + ')' : '') + '" value="' + (subState ? subState.userVal : '') + '">' +
+            '<button type="button" class="btn btn-primary btn-sm" data-action="ex-submit" data-id="' + ex.id + '">Nộp & Kiểm tra</button>' +
+            '<button type="button" class="btn btn-outline btn-sm" data-action="ex-hint" data-id="' + ex.id + '">Gợi ý nhanh</button>' +
+          '</div>' +
+          '<div id="ex-hint-box-' + ex.id + '" style="display:none;margin-top:0.5rem;font-size:0.86rem;color:var(--text-secondary);background:var(--bg-subtle);padding:0.5rem 0.75rem;border-radius:6px;">' +
+            '<strong>Gợi ý:</strong> ' + ex.hint +
+          '</div>' +
+          '<div id="ex-feedback-' + ex.id + '" style="margin-top:0.65rem;">' +
+            (subState ? renderExerciseFeedbackHtml(ex, subState) : '') +
+          '</div>' +
+        '</div>';
+    }
+    container.innerHTML = html;
+  }
+
+  function renderExerciseFeedbackHtml(ex, subState) {
+    var statusBanner = subState.isCorrect
+      ? '<div class="status-banner success" style="display:block;margin-bottom:0.5rem;"><strong>Chính xác!</strong> Đáp án của bạn (' + subState.userVal + ') khớp với kết quả chuẩn (' + ex.answer + (ex.unit ? ' ' + ex.unit : '') + ').</div>'
+      : '<div class="status-banner error" style="display:block;margin-bottom:0.5rem;"><strong>Chưa chính xác.</strong> Bạn đã nhập ' + subState.userVal + '. Sai số cho phép là ±' + ex.tolerance + '. Hãy xem lời giải bên dưới để đối chiếu.</div>';
+
+    return statusBanner +
+      '<div style="background:var(--bg-subtle);padding:0.75rem 0.9rem;border-radius:8px;font-size:0.88rem;border-left:3px solid var(--primary);">' +
+        '<strong>Lời giải chi tiết (hiển thị sau khi nộp bài):</strong><br>' +
+        ex.solution +
+      '</div>';
+  }
+
+  // ============================================================================
+  // ĐỒNG BỘ LỊCH SỬ HỌC TẬP & ĐIỀU HƯỚNG TỨC THÌ (LAZY TAB SWITCHING)
+  // ============================================================================
+
+  function recordHistoryItem(item) {
+    var entry = {
+      timestamp: new Date().toLocaleTimeString('vi-VN'),
+      actionType: item.actionType || 'CALCULATE',
+      expression: item.expression,
+      lowerBound: item.lowerBound,
+      upperBound: item.upperBound,
+      signedIntegral: item.signedIntegral,
+      geometricArea: item.geometricArea,
+      note: item.note || ''
+    };
+    state.localHistory.unshift(entry);
+    if (state.localHistory.length > 15) state.localHistory.pop();
+    renderHistoryTable();
+
+    if (!state.saveHistoryConsent) return;
+
+    if (typeof google !== 'undefined' && google.script && google.script.run) {
+      google.script.run
+        .withSuccessHandler(function() {})
+        .withFailureHandler(function() {})
+        .saveLearningHistory({
+          consent: true,
+          actionType: entry.actionType,
+          expression: entry.expression,
+          lowerBound: entry.lowerBound,
+          upperBound: entry.upperBound,
+          signedIntegral: entry.signedIntegral,
+          geometricArea: entry.geometricArea,
+          note: entry.note
+        });
+    }
+  }
+
+  function renderHistoryTable() {
+    var tbody = document.getElementById('history-table-body');
+    if (!tbody) return;
+    if (state.localHistory.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);">Chưa có thao tác tính toán nào trong phiên này.</td></tr>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < state.localHistory.length; i++) {
+      var h = state.localHistory[i];
+      html +=
+        '<tr>' +
+          '<td>' + h.timestamp + '</td>' +
+          '<td><code>' + h.expression + '</code></td>' +
+          '<td><code>[' + h.lowerBound + ', ' + h.upperBound + ']</code></td>' +
+          '<td><strong>' + formatNum(h.signedIntegral, 4) + '</strong></td>' +
+          '<td>' + formatNum(h.geometricArea, 4) + '</td>' +
+        '</tr>';
+    }
+    tbody.innerHTML = html;
+  }
+
+  /**
+   * Chuyển trang tức thì: chỉ kết xuất lần đầu hoặc khi dữ liệu của tab đó thay đổi.
+   */
+
+  var PAGE_LABELS = {
+    home: '1. Trang chủ',
+    calculator: '2. Máy tính tích phân',
+    applications: '3. Ứng dụng thực tế',
+    library: '4. Thư viện bài toán',
+    exercises: '5. Bài tập luyện tập',
+    dashboard: '6. Dashboard Quản lý',
+    source: '7. Mã nguồn GAS'
+  };
+
+  function toggleDrawer(forceOpen) {
+    var drawer = document.getElementById('sidebar-drawer');
+    var backdrop = document.getElementById('sidebar-backdrop');
+    if (!drawer) return;
+    var isOpen = typeof forceOpen === 'boolean' ? forceOpen : !drawer.classList.contains('open');
+    drawer.classList.toggle('open', isOpen);
+    if (backdrop) backdrop.classList.toggle('open', isOpen);
+  }
+
+  function renderDashboardPage() {
+    var items = state.examples.length > 0 ? state.examples : FALLBACK_EXAMPLES;
+    var appCount = items.filter(function(i) { return i.isApplication; }).length;
+    var mathCount = items.length - appCount;
+
+    var submittedKeys = Object.keys(state.exerciseSubmitted);
+    var totalEx = PRACTICE_EXERCISES.length;
+    var doneEx = submittedKeys.length;
+    var correctEx = 0;
+    for (var i = 0; i < submittedKeys.length; i++) {
+      if (state.exerciseSubmitted[submittedKeys[i]].isCorrect) correctEx++;
+    }
+    var accuracyPct = doneEx > 0 ? Math.round((correctEx / doneEx) * 100) : 0;
+
+    var kpiLib = document.getElementById('dash-kpi-examples');
+    var kpiLibSub = document.getElementById('dash-kpi-examples-sub');
+    var kpiEx = document.getElementById('dash-kpi-exercises');
+    var kpiExSub = document.getElementById('dash-kpi-exercises-sub');
+    var kpiCalc = document.getElementById('dash-kpi-calcs');
+    var kpiDb = document.getElementById('dash-kpi-db');
+
+    if (kpiLib) kpiLib.textContent = String(items.length);
+    if (kpiLibSub) kpiLibSub.textContent = appCount + ' ứng dụng thực tế • ' + mathCount + ' bài giải tích';
+    if (kpiEx) kpiEx.textContent = doneEx + ' / ' + totalEx;
+    if (kpiExSub) kpiExSub.textContent = 'Đúng ' + correctEx + ' câu (' + accuracyPct + '%)';
+    if (kpiCalc) kpiCalc.textContent = String(state.localHistory.length);
+    if (kpiDb) {
+      kpiDb.textContent = state.saveHistoryConsent ? 'Đang bật lưu Sheets' : 'Bộ nhớ cục bộ';
+    }
+
+    var breakdownEl = document.getElementById('dash-category-breakdown');
+    if (breakdownEl) {
+      var catMap = {};
+      for (var j = 0; j < items.length; j++) {
+        var c = items[j].category || 'Khác';
+        catMap[c] = (catMap[c] || 0) + 1;
+      }
+      var catKeys = Object.keys(catMap);
+      var barHtml = '';
+      for (var k = 0; k < catKeys.length; k++) {
+        var cname = catKeys[k];
+        var cnt = catMap[cname];
+        var pct = Math.min(Math.round((cnt / items.length) * 100), 100);
+        barHtml +=
+          '<div style="margin-bottom:0.55rem;">' +
+            '<div style="display:flex;justify-content:space-between;font-size:0.8rem;font-weight:600;">' +
+              '<span>' + cname + '</span>' +
+              '<span>' + cnt + ' bài (' + pct + '%)</span>' +
+            '</div>' +
+            '<div class="progress-track"><div class="progress-fill" style="width:' + Math.max(pct, 8) + '%;"></div></div>' +
+          '</div>';
+      }
+      breakdownEl.innerHTML = barHtml;
+    }
+
+    var mgrBody = document.getElementById('dash-examples-tbody');
+    if (mgrBody) {
+      var rowsHtml = '';
+      for (var m = 0; m < items.length; m++) {
+        var exItem = items[m];
+        rowsHtml +=
+          '<tr>' +
+            '<td><span class="badge badge-blue">' + exItem.category + '</span></td>' +
+            '<td><strong>' + exItem.title + '</strong></td>' +
+            '<td><code>' + exItem.expr + '</code></td>' +
+            '<td><code>[' + exItem.a + ', ' + exItem.b + ']</code></td>' +
+            '<td><strong>' + formatNum(exItem.expectedResult, 4) + ' ' + (exItem.unit || '') + '</strong></td>' +
+            '<td>' +
+              '<div style="display:flex;gap:0.35rem;flex-wrap:wrap;">' +
+                '<button type="button" class="btn btn-secondary btn-sm" data-action="dash-edit-example" data-id="' + exItem.id + '">Sửa</button>' +
+                '<button type="button" class="btn btn-outline btn-sm" data-action="load-to-calc" data-id="' + exItem.id + '">Máy tính</button>' +
+                '<button type="button" class="btn btn-danger btn-sm" data-action="dash-delete-example" data-id="' + exItem.id + '">Xoá</button>' +
+              '</div>' +
+            '</td>' +
+          '</tr>';
+      }
+      mgrBody.innerHTML = rowsHtml;
+    }
+
+    renderDashboardHistoryTable();
+  }
+
+  function renderDashboardHistoryTable() {
+    var tbody = document.getElementById('dash-history-tbody');
+    if (!tbody) return;
+    var filterSelect = document.getElementById('dash-history-filter');
+    var filterVal = filterSelect ? filterSelect.value : 'all';
+    var list = state.localHistory.filter(function(h) {
+      return filterVal === 'all' || h.actionType === filterVal;
+    });
+
+    if (list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:1rem;">Chưa có bản ghi nhật ký phù hợp.</td></tr>';
+      return;
+    }
+
+    var html = '';
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i];
+      var typeBadge = item.actionType === 'EXERCISE' ? 'badge-amber' : 'badge-teal';
+      html +=
+        '<tr>' +
+          '<td>' + item.timestamp + '</td>' +
+          '<td><span class="badge ' + typeBadge + '">' + item.actionType + '</span></td>' +
+          '<td><code>' + item.expression + '</code></td>' +
+          '<td><code>[' + item.lowerBound + ', ' + item.upperBound + ']</code></td>' +
+          '<td><strong>' + formatNum(item.signedIntegral, 4) + '</strong></td>' +
+          '<td>' + (item.note || '—') + '</td>' +
+        '</tr>';
+    }
+    tbody.innerHTML = html;
+  }
+
+  function saveDashboardExampleForm() {
+    var titleEl = document.getElementById('dash-form-title');
+    var catEl = document.getElementById('dash-form-category');
+    var diffEl = document.getElementById('dash-form-difficulty');
+    var exprEl = document.getElementById('dash-form-expr');
+    var aEl = document.getElementById('dash-form-a');
+    var bEl = document.getElementById('dash-form-b');
+    var initEl = document.getElementById('dash-form-init');
+    var unitEl = document.getElementById('dash-form-unit');
+    var questionEl = document.getElementById('dash-form-question');
+    var meaningEl = document.getElementById('dash-form-meaning');
+    var statusEl = document.getElementById('dash-form-status');
+
+    var title = titleEl ? titleEl.value.trim() : '';
+    var expr = exprEl ? exprEl.value.trim() : '';
+    var a = aEl ? Number(aEl.value) : 0;
+    var b = bEl ? Number(bEl.value) : 1;
+    var initVal = initEl ? Number(initEl.value || 0) : 0;
+
+    if (!title || !expr || isNaN(a) || isNaN(b)) {
+      showStatus(statusEl, 'Vui lòng nhập đầy đủ Tiêu đề, Biểu thức f(x) và hai cận a, b hợp lệ.', 'error');
+      return;
+    }
+
+    var compiled = compileSafeExpression(expr);
+    if (!compiled.ok) {
+      showStatus(statusEl, compiled.error, 'error');
+      return;
+    }
+
+    var calc = computeNumericalIntegral(compiled.evalFn, a, b, 140);
+    if (!calc.ok) {
+      showStatus(statusEl, calc.error, 'error');
+      return;
+    }
+
+    var expectedTotal = initVal + calc.signedIntegral;
+    var cat = catEl ? catEl.value : 'Giải tích';
+    var isApp = (cat !== 'Giải tích' && cat !== 'Phương pháp số');
+
+    var newItem = {
+      id: state.editingExampleId || ('custom-' + new Date().getTime()),
+      code: isApp ? 'U' : 'M',
+      isApplication: isApp,
+      title: title,
+      category: cat,
+      difficulty: diffEl ? diffEl.value : 'Trung bình',
+      situation: questionEl && questionEl.value.trim() ? questionEl.value.trim() : 'Bài toán mô hình do người quản lý tạo trên Dashboard.',
+      dataDesc: 'f(x) = ' + expr + ' trên đoạn [' + a + ', ' + b + '].',
+      question: questionEl && questionEl.value.trim() ? questionEl.value.trim() : ('Tính giá trị tích phân của ' + expr + ' trên [' + a + ', ' + b + '].'),
+      expr: expr,
+      displayExpr: 'f(x) = ' + expr,
+      variable: isApp ? 't' : 'x',
+      a: a,
+      b: b,
+      initialValue: initVal,
+      expectedResult: expectedTotal,
+      unit: unitEl ? unitEl.value.trim() : 'đv',
+      rateUnit: '',
+      timeUnit: '',
+      modelLatex: 'I = \int_{' + a + '}^{' + b + '} (' + expr + ') dx = ' + formatNum(expectedTotal, 4),
+      antiderivativeLatex: '',
+      meaning: meaningEl && meaningEl.value.trim() ? meaningEl.value.trim() : ('Kết quả tính tự động bằng phương pháp Simpson 1/3 đạt ' + formatNum(expectedTotal, 4) + '.'),
+      steps: [
+        'Thiết lập tích phân xác định của hàm f(x) = ' + expr + ' từ ' + a + ' đến ' + b + '.',
+        'Tính giá trị tích phân bằng phương pháp số Simpson 1/3: ' + formatNum(calc.signedIntegral, 4) + '.',
+        'Kết quả tổng cộng: ' + formatNum(expectedTotal, 4) + ' ' + (unitEl ? unitEl.value.trim() : '') + '.'
+      ]
+    };
+
+    var updated = false;
+    for (var i = 0; i < state.examples.length; i++) {
+      if (state.examples[i].id === newItem.id) {
+        state.examples[i] = newItem;
+        updated = true;
+        break;
+      }
+    }
+    if (!updated) {
+      state.examples.unshift(newItem);
+    }
+
+    state.editingExampleId = null;
+    state.renderedTabs.library = false;
+    state.renderedTabs.applications = false;
+    renderHomeFeaturedApps();
+    renderDashboardPage();
+
+    showStatus(statusEl, 'Đã lưu bài toán "' + newItem.title + '" (Kết quả chuẩn: ' + formatNum(expectedTotal, 4) + ').', 'success');
+
+    if (typeof google !== 'undefined' && google.script && google.script.run) {
+      google.script.run
+        .withSuccessHandler(function() {})
+        .withFailureHandler(function() {})
+        .saveCustomExample(newItem);
+    }
+  }
+
+  function resetDashboardExampleForm() {
+    state.editingExampleId = null;
+    document.getElementById('dash-form-title').value = '';
+    document.getElementById('dash-form-expr').value = '4*x + 2';
+    document.getElementById('dash-form-a').value = '0';
+    document.getElementById('dash-form-b').value = '5';
+    document.getElementById('dash-form-init').value = '0';
+    document.getElementById('dash-form-unit').value = 'm';
+    document.getElementById('dash-form-question').value = '';
+    document.getElementById('dash-form-meaning').value = '';
+    hideStatus(document.getElementById('dash-form-status'));
+  }
+
+  function loadExampleIntoDashboardForm(id) {
+    var items = state.examples;
+    var found = null;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].id === id) { found = items[i]; break; }
+    }
+    if (!found) return;
+    state.editingExampleId = found.id;
+    document.getElementById('dash-form-title').value = found.title;
+    document.getElementById('dash-form-category').value = found.category || 'Giải tích';
+    document.getElementById('dash-form-difficulty').value = found.difficulty || 'Trung bình';
+    document.getElementById('dash-form-expr').value = found.expr;
+    document.getElementById('dash-form-a').value = found.a;
+    document.getElementById('dash-form-b').value = found.b;
+    document.getElementById('dash-form-init').value = found.initialValue || 0;
+    document.getElementById('dash-form-unit').value = found.unit || '';
+    document.getElementById('dash-form-question').value = found.question || '';
+    document.getElementById('dash-form-meaning').value = found.meaning || '';
+    showStatus(document.getElementById('dash-form-status'), 'Đang chỉnh sửa bài toán: ' + found.title, 'info');
+  }
+
+  function deleteDashboardExample(id) {
+    if (state.examples.length <= 1) return;
+    state.examples = state.examples.filter(function(item) { return item.id !== id; });
+    state.renderedTabs.library = false;
+    state.renderedTabs.applications = false;
+    renderHomeFeaturedApps();
+    renderDashboardPage();
+  }
+
+  function exportHistoryCsv() {
+    var rows = [
+      ['ThoiGian', 'LoaiThaoTac', 'BieuThuc', 'CanDuoi_a', 'CanTren_b', 'TichPhanCoDau', 'DienTichHinhHoc', 'GhiChu']
+    ];
+    for (var i = 0; i < state.localHistory.length; i++) {
+      var h = state.localHistory[i];
+      rows.push([
+        h.timestamp,
+        h.actionType,
+        '"' + String(h.expression).replace(/"/g, '""') + '"',
+        h.lowerBound,
+        h.upperBound,
+        h.signedIntegral,
+        h.geometricArea,
+        '"' + String(h.note || '').replace(/"/g, '""') + '"'
+      ]);
+    }
+    var csvContent = '\uFEFF' + rows.map(function(r) { return r.join(','); }).join('\n');
+    var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'integral_lab_lich_su_hoc_tap.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function triggerSetupDatabaseFromDashboard() {
+    var statusEl = document.getElementById('dash-db-status');
+    if (typeof google !== 'undefined' && google.script && google.script.run) {
+      showStatus(statusEl, 'Đang gửi yêu cầu khởi tạo trang tính Examples & LearningHistory...', 'info');
+      google.script.run
+        .withSuccessHandler(function(res) {
+          if (res && res.ok) {
+            showStatus(statusEl, res.message + (res.spreadsheetUrl ? ' URL: ' + res.spreadsheetUrl : ''), 'success');
+          } else {
+            showStatus(statusEl, (res && res.message) || 'Không thể khởi tạo Google Sheets.', 'error');
+          }
+        })
+        .withFailureHandler(function(err) {
+          showStatus(statusEl, 'Lỗi kết nối Google Apps Script: ' + err, 'error');
+        })
+        .setupDatabase();
+    } else {
+      showStatus(
+        statusEl,
+        'Bạn đang chạy bản xem trước trực tiếp (Canvas). Khi triển khai trên Google Apps Script, nút này sẽ tự động tạo tệp Google Sheets Integral_Lab_Database.',
+        'info'
+      );
+    }
+  }
+
+  function switchPage(pageId, forceRender) {
+    toggleDrawer(false);
+    var pillEl = document.getElementById('current-page-indicator');
+    if (pillEl && PAGE_LABELS[pageId]) pillEl.textContent = PAGE_LABELS[pageId];
+    var dBtns = document.querySelectorAll('.drawer-item');
+    for (var d = 0; d < dBtns.length; d++) {
+      dBtns[d].classList.toggle('active', dBtns[d].getAttribute('data-page') === pageId);
+    }
+    state.currentPage = pageId;
+    var sections = document.querySelectorAll('.page-section');
+    for (var i = 0; i < sections.length; i++) {
+      sections[i].classList.toggle('active', sections[i].id === 'page-' + pageId);
+    }
+    var menuToggleBtn = document.getElementById('btn-toggle-menu');
+    if (menuToggleBtn) menuToggleBtn.addEventListener('click', function() { toggleDrawer(); });
+    var closeDrawerBtn = document.getElementById('btn-close-drawer');
+    if (closeDrawerBtn) closeDrawerBtn.addEventListener('click', function() { toggleDrawer(false); });
+    var backdrop = document.getElementById('sidebar-backdrop');
+    if (backdrop) backdrop.addEventListener('click', function() { toggleDrawer(false); });
+
+    var engineToggleBtn = document.getElementById('btn-toggle-plot-engine');
+    if (engineToggleBtn) {
+      engineToggleBtn.addEventListener('click', function() {
+        var isPlotly = IntegralGraph.getEngineMode() === 'plotly';
+        IntegralGraph.setEngineMode(!isPlotly);
+        this.textContent = !isPlotly ? 'Đồ thị: Plotly SVG' : 'Đồ thị: Siêu mượt 0ms';
+      });
+    }
+
+    var dashSaveBtn = document.getElementById('btn-dash-save-example');
+    if (dashSaveBtn) dashSaveBtn.addEventListener('click', saveDashboardExampleForm);
+    var dashResetFormBtn = document.getElementById('btn-dash-reset-form');
+    if (dashResetFormBtn) dashResetFormBtn.addEventListener('click', resetDashboardExampleForm);
+    var dashExportCsvBtn = document.getElementById('btn-dash-export-csv');
+    if (dashExportCsvBtn) dashExportCsvBtn.addEventListener('click', exportHistoryCsv);
+    var dashClearHistBtn = document.getElementById('btn-dash-clear-history');
+    if (dashClearHistBtn) {
+      dashClearHistBtn.addEventListener('click', function() {
+        state.localHistory = [];
+        renderHistoryTable();
+        renderDashboardPage();
+      });
+    }
+    var dashSetupDbBtn = document.getElementById('btn-dash-setup-db');
+    if (dashSetupDbBtn) dashSetupDbBtn.addEventListener('click', triggerSetupDatabaseFromDashboard);
+    var dashHistFilter = document.getElementById('dash-history-filter');
+    if (dashHistFilter) dashHistFilter.addEventListener('change', renderDashboardHistoryTable);
+
+    var navBtns = document.querySelectorAll('.nav-btn, .drawer-item');
+    for (var j = 0; j < navBtns.length; j++) {
+      navBtns[j].classList.toggle('active', navBtns[j].getAttribute('data-page') === pageId);
+    }
+
+    var shouldRender = Boolean(forceRender) || !state.renderedTabs[pageId];
+    state.renderedTabs[pageId] = true;
+
+    if (pageId === 'home') {
+      if (shouldRender) runAnalysis('home');
+      else IntegralGraph.resizePlot('home-plot');
+    } else if (pageId === 'calculator') {
+      if (shouldRender) runAnalysis('calc');
+      else IntegralGraph.resizePlot('calc-plot');
+    } else if (pageId === 'applications') {
+      if (shouldRender) renderApplicationsPage();
+      else IntegralGraph.resizePlot('app-spotlight-plot');
+    } else if (pageId === 'library') {
+      if (shouldRender) renderLibraryPage();
+    } else if (pageId === 'exercises') {
+      if (shouldRender) renderExercisesPage();
+    } else if (pageId === 'dashboard') {
+      renderDashboardPage();
+    }
+  }
+
+  function loadExampleIntoCalculator(exampleId) {
+    var items = state.examples.length > 0 ? state.examples : FALLBACK_EXAMPLES;
+    var target = null;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].id === exampleId) { target = items[i]; break; }
+    }
+    if (!target) return;
+
+    document.getElementById('calc-expr').value = target.expr;
+    document.getElementById('calc-a').value = target.a;
+    document.getElementById('calc-b').value = target.b;
+    document.getElementById('calc-mode').value = 'definite';
+    switchPage('calculator', true);
+  }
+
+  // ============================================================================
+  // GẮN SỰ KIỆN GIAO DIỆN & KHỞI TẠO NHANH
+  // ============================================================================
+
+  function bindEvents() {
+    var menuToggleBtn = document.getElementById('btn-toggle-menu');
+    if (menuToggleBtn) menuToggleBtn.addEventListener('click', function() { toggleDrawer(); });
+    var closeDrawerBtn = document.getElementById('btn-close-drawer');
+    if (closeDrawerBtn) closeDrawerBtn.addEventListener('click', function() { toggleDrawer(false); });
+    var backdrop = document.getElementById('sidebar-backdrop');
+    if (backdrop) backdrop.addEventListener('click', function() { toggleDrawer(false); });
+
+    var engineToggleBtn = document.getElementById('btn-toggle-plot-engine');
+    if (engineToggleBtn) {
+      engineToggleBtn.addEventListener('click', function() {
+        var isPlotly = IntegralGraph.getEngineMode() === 'plotly';
+        IntegralGraph.setEngineMode(!isPlotly);
+        this.textContent = !isPlotly ? 'Đồ thị: Plotly SVG' : 'Đồ thị: Siêu mượt 0ms';
+      });
+    }
+
+    var dashSaveBtn = document.getElementById('btn-dash-save-example');
+    if (dashSaveBtn) dashSaveBtn.addEventListener('click', saveDashboardExampleForm);
+    var dashResetFormBtn = document.getElementById('btn-dash-reset-form');
+    if (dashResetFormBtn) dashResetFormBtn.addEventListener('click', resetDashboardExampleForm);
+    var dashExportCsvBtn = document.getElementById('btn-dash-export-csv');
+    if (dashExportCsvBtn) dashExportCsvBtn.addEventListener('click', exportHistoryCsv);
+    var dashClearHistBtn = document.getElementById('btn-dash-clear-history');
+    if (dashClearHistBtn) {
+      dashClearHistBtn.addEventListener('click', function() {
+        state.localHistory = [];
+        renderHistoryTable();
+        renderDashboardPage();
+      });
+    }
+    var dashSetupDbBtn = document.getElementById('btn-dash-setup-db');
+    if (dashSetupDbBtn) dashSetupDbBtn.addEventListener('click', triggerSetupDatabaseFromDashboard);
+    var dashHistFilter = document.getElementById('dash-history-filter');
+    if (dashHistFilter) dashHistFilter.addEventListener('change', renderDashboardHistoryTable);
+
+    var navBtns = document.querySelectorAll('.nav-btn, .drawer-item');
+    for (var i = 0; i < navBtns.length; i++) {
+      navBtns[i].addEventListener('click', function() {
+        var page = this.getAttribute('data-page');
+        if (page) switchPage(page, false);
+      });
+    }
+
+    var brandLink = document.getElementById('brand-home-link');
+    if (brandLink) {
+      brandLink.addEventListener('click', function() { switchPage('home', false); });
+    }
+
+    var consentCheckbox = document.getElementById('toggle-save-history');
+    if (consentCheckbox) {
+      consentCheckbox.addEventListener('change', function() {
+        state.saveHistoryConsent = this.checked;
+        var badge = document.getElementById('db-sync-badge');
+        if (badge) {
+          badge.textContent = this.checked ? 'Đang bật lưu Google Sheets' : 'Lưu lịch sử: Tắt';
+        }
+      });
+    }
+
+    var homeAnalyzeBtn = document.getElementById('btn-home-analyze');
+    if (homeAnalyzeBtn) {
+      homeAnalyzeBtn.addEventListener('click', function() { runAnalysis('home'); });
+    }
+    var homeResetBtn = document.getElementById('btn-home-reset');
+    if (homeResetBtn) {
+      homeResetBtn.addEventListener('click', function() {
+        document.getElementById('home-expr').value = 'x^2';
+        document.getElementById('home-a').value = '0';
+        document.getElementById('home-b').value = '3';
+        runAnalysis('home');
+      });
+    }
+    var homeDownloadBtn = document.getElementById('btn-home-download');
+    if (homeDownloadBtn) {
+      homeDownloadBtn.addEventListener('click', function() {
+        IntegralGraph.downloadPlotImage('home-plot', 'integral_lab_trang_chu');
+      });
+    }
+
+    var calcAnalyzeBtn = document.getElementById('btn-calc-analyze');
+    if (calcAnalyzeBtn) {
+      calcAnalyzeBtn.addEventListener('click', function() { runAnalysis('calc'); });
+    }
+    var calcResetBtn = document.getElementById('btn-calc-reset');
+    if (calcResetBtn) {
+      calcResetBtn.addEventListener('click', function() {
+        document.getElementById('calc-expr').value = '2*x';
+        document.getElementById('calc-a').value = '0';
+        document.getElementById('calc-b').value = '5';
+        document.getElementById('calc-n').value = '200';
+        document.getElementById('calc-mode').value = 'definite';
+        document.getElementById('calc-abs').checked = false;
+        runAnalysis('calc');
+      });
+    }
+    var calcZoomResetBtn = document.getElementById('btn-calc-zoom-reset');
+    if (calcZoomResetBtn) {
+      calcZoomResetBtn.addEventListener('click', function() {
+        IntegralGraph.resetPlotView('calc-plot');
+      });
+    }
+    var calcDownloadBtn = document.getElementById('btn-calc-download');
+    if (calcDownloadBtn) {
+      calcDownloadBtn.addEventListener('click', function() {
+        IntegralGraph.downloadPlotImage('calc-plot', 'integral_lab_may_tinh');
+      });
+    }
+
+    document.body.addEventListener('click', function(ev) {
+      var chip = ev.target.closest('.chip-btn');
+      if (chip) {
+        var targetPrefix = chip.getAttribute('data-target') || 'calc';
+        var expr = chip.getAttribute('data-expr');
+        var a = chip.getAttribute('data-a');
+        var b = chip.getAttribute('data-b');
+        if (expr) document.getElementById(targetPrefix + '-expr').value = expr;
+        if (a !== null && a !== undefined) document.getElementById(targetPrefix + '-a').value = a;
+        if (b !== null && b !== undefined) document.getElementById(targetPrefix + '-b').value = b;
+        runAnalysis(targetPrefix);
+        return;
+      }
+
+      var actionBtn = ev.target.closest('[data-action]');
+      if (!actionBtn) return;
+
+      var action = actionBtn.getAttribute('data-action');
+      var id = actionBtn.getAttribute('data-id');
+
+      if (action === 'open-app-detail') {
+        state.activeApplicationId = id;
+        switchPage('applications', true);
+        var cardEl = document.getElementById('card-' + id);
+        if (cardEl) cardEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } else if (action === 'load-to-calc') {
+        loadExampleIntoCalculator(id);
+      } else if (action === 'app-view-graph') {
+        renderApplicationSpotlightPlot(id);
+        var plotSpot = document.getElementById('app-spotlight-card');
+        if (plotSpot) plotSpot.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } else if (action === 'app-toggle-panel') {
+        var panelType = actionBtn.getAttribute('data-panel');
+        var panelEl = document.getElementById('panel-' + panelType + '-' + id);
+        if (panelEl) {
+          var isOpening = !panelEl.classList.contains('open');
+          panelEl.classList.toggle('open');
+          if (isOpening && panelType === 'steps') {
+            typesetMath(panelEl);
+          }
+        }
+      } else if (action === 'app-apply-custom') {
+        var newExpr = document.getElementById('edit-expr-' + id).value;
+        var newA = Number(document.getElementById('edit-a-' + id).value);
+        var newB = Number(document.getElementById('edit-b-' + id).value);
+        var newInit = Number(document.getElementById('edit-init-' + id).value || 0);
+        state.customAppParams[id] = { expr: newExpr, a: newA, b: newB, initialValue: newInit };
+        delete state.similarProblems[id];
+        state.activeApplicationId = id;
+        renderApplicationsPage();
+      } else if (action === 'app-reset-custom') {
+        delete state.customAppParams[id];
+        delete state.similarProblems[id];
+        state.activeApplicationId = id;
+        renderApplicationsPage();
+      } else if (action === 'app-generate-similar') {
+        generateSimilarAppProblem(id);
+      } else if (action === 'app-verify-answer') {
+        verifyApplicationAnswer(id);
+      } else if (action === 'view-lib-detail') {
+        showLibraryDetail(id);
+      } else if (action === 'close-lib-detail') {
+        var box = document.getElementById('library-detail-box');
+        if (box) box.style.display = 'none';
+      } else if (action === 'ex-submit') {
+        submitExerciseAnswer(id);
+      } else if (action === 'ex-hint') {
+        var hBox = document.getElementById('ex-hint-box-' + id);
+        if (hBox) hBox.style.display = hBox.style.display === 'none' ? 'block' : 'none';
+      } else if (action === 'dash-edit-example') {
+        loadExampleIntoDashboardForm(id);
+      } else if (action === 'dash-delete-example') {
+        deleteDashboardExample(id);
+      } else if (action === 'ex-plot-preview') {
+        var exObj = null;
+        for (var k = 0; k < PRACTICE_EXERCISES.length; k++) {
+          if (PRACTICE_EXERCISES[k].id === id) { exObj = PRACTICE_EXERCISES[k]; break; }
+        }
+        if (exObj) {
+          document.getElementById('calc-expr').value = exObj.expr;
+          document.getElementById('calc-a').value = exObj.a;
+          document.getElementById('calc-b').value = exObj.b;
+          switchPage('calculator', true);
+        }
+      }
+    });
+
+    var libCat = document.getElementById('lib-filter-category');
+    if (libCat) libCat.addEventListener('change', renderLibraryPage);
+
+    var searchTimer = null;
+    var libSearch = document.getElementById('lib-search-input');
+    if (libSearch) {
+      libSearch.addEventListener('input', function() {
+        if (searchTimer) clearTimeout(searchTimer);
+        searchTimer = setTimeout(renderLibraryPage, 120);
+      });
+    }
+
+    var exLevelBtns = document.querySelectorAll('[data-ex-level]');
+    for (var m = 0; m < exLevelBtns.length; m++) {
+      exLevelBtns[m].addEventListener('click', function() {
+        state.exerciseLevel = this.getAttribute('data-ex-level');
+        for (var n = 0; n < exLevelBtns.length; n++) {
+          exLevelBtns[n].classList.toggle('btn-primary', exLevelBtns[n] === this);
+          exLevelBtns[n].classList.toggle('btn-secondary', exLevelBtns[n] !== this);
+        }
+        renderExercisesPage();
+      });
+    }
+  }
+
+  function verifyApplicationAnswer(appId) {
+    var inputEl = document.getElementById('check-ans-' + appId);
+    var fbEl = document.getElementById('check-feedback-' + appId);
+    if (!inputEl || !fbEl) return;
+
+    var rawVal = inputEl.value.trim();
+    if (rawVal === '' || isNaN(Number(rawVal))) {
+      fbEl.innerHTML = '<span style="color:var(--danger);font-weight:600;">Vui lòng nhập một số hợp lệ để kiểm tra.</span>';
+      return;
+    }
+    var userVal = Number(rawVal);
+    var similar = state.similarProblems[appId];
+    var expected = 0;
+
+    if (similar) {
+      expected = similar.expected;
+    } else {
+      var apps = getApplicationsList();
+      var app = null;
+      for (var i = 0; i < apps.length; i++) {
+        if (apps[i].id === appId) { app = apps[i]; break; }
+      }
+      if (!app) return;
+      var custom = state.customAppParams[appId] || { expr: app.expr, a: app.a, b: app.b, initialValue: app.initialValue || 0 };
+      var compiled = compileSafeExpression(custom.expr);
+      if (compiled.ok) {
+        var r = computeNumericalIntegral(compiled.evalFn, Number(custom.a), Number(custom.b), 120);
+        expected = Number(custom.initialValue || 0) + (r.ok ? r.signedIntegral : 0);
+      }
+    }
+
+    var diff = Math.abs(userVal - expected);
+    if (diff <= 0.05) {
+      fbEl.innerHTML = '<span style="color:var(--success);font-weight:700;">Chính xác! Đáp án chuẩn là ' + formatNum(expected, 4) + '.</span>';
+    } else {
+      fbEl.innerHTML = '<span style="color:var(--danger);font-weight:600;">Chưa khớp. Đáp án đúng của mô hình là ' + formatNum(expected, 4) + ' (chênh lệch ' + formatNum(diff, 4) + ').</span>';
+    }
+  }
+
+  function submitExerciseAnswer(exId) {
+    var inputEl = document.getElementById('ex-input-' + exId);
+    if (!inputEl) return;
+    var raw = inputEl.value.trim();
+    if (raw === '' || isNaN(Number(raw))) {
+      var fb = document.getElementById('ex-feedback-' + exId);
+      if (fb) {
+        fb.innerHTML = '<div class="status-banner error" style="display:block;">Vui lòng nhập đáp án dạng số trước khi nộp bài.</div>';
+      }
+      return;
+    }
+
+    var ex = null;
+    for (var i = 0; i < PRACTICE_EXERCISES.length; i++) {
+      if (PRACTICE_EXERCISES[i].id === exId) { ex = PRACTICE_EXERCISES[i]; break; }
+    }
+    if (!ex) return;
+
+    var userNum = Number(raw);
+    var isCorrect = Math.abs(userNum - ex.answer) <= ex.tolerance;
+    state.exerciseSubmitted[exId] = {
+      userVal: userNum,
+      isCorrect: isCorrect
+    };
+
+    recordHistoryItem({
+      actionType: 'EXERCISE',
+      expression: ex.expr,
+      lowerBound: ex.a,
+      upperBound: ex.b,
+      signedIntegral: ex.answer,
+      geometricArea: Math.abs(ex.answer),
+      note: ex.title + (isCorrect ? ' (Đúng)' : ' (Chưa đúng)')
+    });
+
+    var fbBox = document.getElementById('ex-feedback-' + exId);
+    if (fbBox) {
+      fbBox.innerHTML = renderExerciseFeedbackHtml(ex, state.exerciseSubmitted[exId]);
+    }
+  }
+
+  function init() {
+    state.examples = FALLBACK_EXAMPLES.slice();
+    bindEvents();
+
+    // Khi mới mở trang, chỉ kết xuất đúng Trang chủ đang hiển thị để tốc độ tải tức thì (< 50ms)
+    renderHomeFeaturedApps();
+    renderHistoryTable();
+    state.renderedTabs.home = true;
+    runAnalysis('home');
+
+    // Tải đồng bộ dữ liệu từ Google Apps Script Backend nếu đang chạy trên GAS
+    if (typeof google !== 'undefined' && google.script && google.script.run) {
+      google.script.run
+        .withSuccessHandler(function(response) {
+          if (response && response.ok && response.items && response.items.length > 0) {
+            state.examples = response.items;
+            renderHomeFeaturedApps();
+            if (state.renderedTabs.applications) renderApplicationsPage();
+            if (state.renderedTabs.library) renderLibraryPage();
+          }
+        })
+        .withFailureHandler(function() {})
+        .getExamples();
+    }
+  }
+
+  return {
+    init: init,
+    runAnalysis: runAnalysis,
+    switchPage: switchPage
+  };
+})();
+
+window.addEventListener('DOMContentLoaded', function() {
+  IntegralApp.init();
+});
+</script>

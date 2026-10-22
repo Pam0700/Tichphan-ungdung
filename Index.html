@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Integral Lab – Phòng thí nghiệm tích phân</title>
+  <!-- Thư viện CDN tối ưu tốc độ tải: plotly-basic nhẹ gấp 4 lần, MathJax chỉ chạy trên vùng chỉ định -->
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/12.4.1/math.js"></script>
+  <script defer src="https://cdn.plot.ly/plotly-basic-2.27.0.min.js"></script>
+  <script>
+    window.MathJax = {
+      startup: { typeset: false },
+      tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$']] },
+      options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] },
+      svg: { fontCache: 'global' }
+    };
+  </script>
+  <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+  <?!= include('Styles'); ?>
+</head>
+<body>
+
+  <!-- Thanh điều hướng khoá cố định kèm nút mở Menu ẩn -->
+  <header class="top-header">
+    <div class="header-inner">
+      <div class="header-left">
+        <button type="button" id="btn-toggle-menu" class="menu-trigger-btn" title="Mở/Đóng Menu điều hướng ẩn">
+          <span>☰</span>
+          <span>Menu</span>
+        </button>
+
+        <div class="brand" id="brand-home-link" title="Về trang chủ Integral Lab">
+          <span class="brand-badge">∫</span>
+          <span>Integral Lab</span>
+        </div>
+
+        <span id="current-page-indicator" class="current-page-pill">1. Trang chủ</span>
+      </div>
+
+      <nav class="nav-tabs" aria-label="Điều hướng chính">
+        <button type="button" class="nav-btn active" data-page="home">1. Trang chủ</button>
+        <button type="button" class="nav-btn" data-page="calculator">2. Máy tính tích phân</button>
+        <button type="button" class="nav-btn" data-page="applications">3. Ứng dụng thực tế</button>
+        <button type="button" class="nav-btn" data-page="library">4. Thư viện bài toán</button>
+        <button type="button" class="nav-btn" data-page="exercises">5. Bài tập luyện tập</button>
+        <button type="button" class="nav-btn" data-page="dashboard">6. Dashboard Quản lý</button>
+      </nav>
+
+      <div class="header-utils">
+        <button type="button" id="btn-toggle-plot-engine" class="btn btn-secondary btn-sm" title="Chuyển đổi giữa bộ vẽ Siêu mượt 0ms (Canvas) và Plotly SVG">
+          Đồ thị: Siêu mượt 0ms
+        </button>
+        <label class="history-toggle-label" title="Chỉ lưu lịch sử học tập vào Google Sheets khi bạn bật tính năng này">
+          <input type="checkbox" id="toggle-save-history">
+          <span id="db-sync-badge">Lưu lịch sử: Tắt</span>
+        </label>
+      </div>
+    </div>
+  </header>
+
+  <!-- MENU ẨN DẠNG NGĂN KÉO TRƯỢT (OFF-CANVAS COLLAPSIBLE DRAWER) -->
+  <div id="sidebar-backdrop" class="drawer-backdrop"></div>
+  <aside id="sidebar-drawer" class="sidebar-drawer" aria-label="Menu điều hướng ẩn">
+    <div>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:0.2rem 0.5rem 0.75rem;border-bottom:1px solid var(--border);margin-bottom:0.65rem;">
+        <div>
+          <div style="font-weight:800;color:var(--primary);font-size:0.95rem;">Danh mục chức năng</div>
+          <div style="font-size:0.75rem;color:var(--text-muted);">Chọn trang làm việc (tự đóng menu)</div>
+        </div>
+        <button type="button" id="btn-close-drawer" class="btn btn-secondary btn-sm">✕</button>
+      </div>
+
+      <div class="drawer-section-label">Không gian học tập</div>
+      <div class="drawer-nav-list" style="margin-bottom:0.85rem;">
+        <button type="button" class="drawer-item active" data-page="home">
+          <span>1. Trang chủ &amp; Trải nghiệm nhanh</span>
+          <span class="badge badge-teal">Mặc định</span>
+        </button>
+        <button type="button" class="drawer-item" data-page="calculator">
+          <span>2. Máy tính tích phân đầy đủ</span>
+          <span class="badge badge-blue">Simpson 1/3</span>
+        </button>
+        <button type="button" class="drawer-item" data-page="applications">
+          <span>3. Ứng dụng thực tế (A – G)</span>
+          <span class="badge badge-blue">7 chủ đề</span>
+        </button>
+        <button type="button" class="drawer-item" data-page="library">
+          <span>4. Thư viện bài toán</span>
+          <span class="badge badge-teal">Tra cứu</span>
+        </button>
+        <button type="button" class="drawer-item" data-page="exercises">
+          <span>5. Bài tập luyện tập</span>
+          <span class="badge badge-amber">3 cấp độ</span>
+        </button>
+      </div>
+
+      <div class="drawer-section-label">Quản trị &amp; Hệ thống</div>
+      <div class="drawer-nav-list" id="drawer-system-list">
+        <button type="button" class="drawer-item" data-page="dashboard">
+          <span>6. Dashboard Quản lý</span>
+          <span class="badge badge-blue">Quản trị</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="drawer-footer-box">
+      <div style="font-weight:700;color:var(--text-primary);margin-bottom:0.2rem;">Bố cục: Đã khoá cố định</div>
+      <div>Khung nhìn 100vh chống trôi trang, phản hồi chạm nút tức thì (&lt; 1.5ms).</div>
+    </div>
+  </aside>
+
+  <main class="main-container">
+    <!-- =================================================================== -->
+    <!-- TRANG 1: TRANG CHỦ (Mục 11)                                          -->
+    <!-- =================================================================== -->
+    <section id="page-home" class="page-section active">
+      <div class="hero-banner">
+        <div>
+          <h1 class="hero-title">Khám phá thế giới bằng tích phân</h1>
+          <p class="hero-subtitle">
+            Hiểu trực quan bản chất diện tích có dấu, tổng tích lũy và mối liên hệ giữa tốc độ thay đổi với đại lượng thực tế thông qua đồ thị tương tác và giải thích từng bước.
+          </p>
+        </div>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+          <button type="button" class="btn btn-primary" data-page="calculator" onclick="IntegralApp.switchPage('calculator')">Mở Máy tính đầy đủ</button>
+          <button type="button" class="btn btn-secondary" data-page="applications" onclick="IntegralApp.switchPage('applications')">7 Ứng dụng thực tế</button>
+        </div>
+      </div>
+
+      <!-- Trải nghiệm nhanh ngay tại Trang chủ (hiển thị sẵn ví dụ y = x^2 trên [0, 3]) -->
+      <div class="workspace-grid" style="margin-bottom:2rem;">
+        <div class="card">
+          <div class="card-title">
+            <span>Trải nghiệm nhanh</span>
+            <span class="badge badge-teal">Ví dụ mẫu sẵn sàng</span>
+          </div>
+
+          <div id="home-status" class="status-banner"></div>
+
+          <div class="form-group">
+            <label class="form-label" for="home-expr">Hàm số f(x):</label>
+            <input type="text" id="home-expr" class="form-input" value="x^2" placeholder="Ví dụ: x^2, 2*x, sin(x), exp(-x)">
+            <div class="quick-chips">
+              <button type="button" class="chip-btn" data-target="home" data-expr="x^2" data-a="0" data-b="3">x^2 [0,3]</button>
+              <button type="button" class="chip-btn" data-target="home" data-expr="2*x" data-a="0" data-b="5">2*x [0,5]</button>
+              <button type="button" class="chip-btn" data-target="home" data-expr="sin(x)" data-a="0" data-b="6.2832">sin(x) [0,2π]</button>
+              <button type="button" class="chip-btn" data-target="home" data-expr="x^2 - 4" data-a="-3" data-b="3">x^2 - 4 [-3,3]</button>
+            </div>
+          </div>
+
+          <div class="form-row-2 form-group">
+            <div>
+              <label class="form-label" for="home-a">Cận dưới a:</label>
+              <input type="number" step="any" id="home-a" class="form-input" value="0">
+            </div>
+            <div>
+              <label class="form-label" for="home-b">Cận trên b:</label>
+              <input type="number" step="any" id="home-b" class="form-input" value="3">
+            </div>
+          </div>
+
+          <input type="hidden" id="home-n" value="200">
+          <input type="hidden" id="home-mode" value="definite">
+
+          <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.75rem;">
+            <button type="button" id="btn-home-analyze" class="btn btn-primary" style="flex:1;">Vẽ đồ thị và phân tích</button>
+            <button type="button" id="btn-home-reset" class="btn btn-secondary">Đặt lại</button>
+            <button type="button" id="btn-home-download" class="btn btn-secondary" title="Tải ảnh đồ thị PNG">Tải ảnh</button>
+          </div>
+
+          <div class="metrics-grid" style="grid-template-columns:1fr;margin-top:1rem;">
+            <div class="metric-box primary-accent">
+              <div class="metric-label">Tích phân xác định (có dấu)</div>
+              <div class="metric-value" id="home-res-signed">9</div>
+              <div class="metric-sub">∫ₐᵇ f(x) dx</div>
+            </div>
+            <div class="metric-box teal-accent">
+              <div class="metric-label">Diện tích hình học phẳng</div>
+              <div class="metric-value" id="home-res-area">9 đvdt</div>
+              <div class="metric-sub">S = ∫ₐᵇ |f(x)| dx</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">
+            <span>Khu vực đồ thị & Giải thích ý nghĩa</span>
+            <span style="font-size:0.8rem;color:var(--text-muted);font-weight:500;">Cuộn chuột để phóng to/thu nhỏ, kéo để di chuyển</span>
+          </div>
+          <div id="home-plot" class="plot-container"></div>
+          <div id="home-res-formula" style="margin-top:0.75rem;text-align:center;font-size:1rem;"></div>
+          <div id="home-res-meaning" style="margin-top:0.65rem;padding:0.8rem 1rem;background:var(--bg-subtle);border-radius:8px;font-size:0.92rem;"></div>
+        </div>
+      </div>
+
+      <!-- Danh sách các ứng dụng thực tế nổi bật trên Trang chủ -->
+      <div class="card">
+        <div class="card-title">
+          <span>Danh sách các ứng dụng thực tế nổi bật (Chủ đề A – G)</span>
+          <button type="button" class="btn btn-outline btn-sm" onclick="IntegralApp.switchPage('applications')">Xem toàn bộ phòng thí nghiệm thực tế →</button>
+        </div>
+        <div id="home-featured-apps" class="apps-grid"></div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- TRANG 2: MÁY TÍNH TÍCH PHÂN & GIẢI THÍCH TỪNG BƯỚC (Mục 4 & 5)       -->
+    <!-- =================================================================== -->
+    <section id="page-calculator" class="page-section">
+      <div class="workspace-grid">
+        <div class="card">
+          <div class="card-title">
+            <span>Thông số đầu vào</span>
+            <span class="badge badge-blue">Math.js Safe Parser</span>
+          </div>
+
+          <div id="calc-status" class="status-banner"></div>
+
+          <div class="form-group">
+            <label class="form-label" for="calc-mode">Chế độ phân tích:</label>
+            <select id="calc-mode" class="form-select">
+              <option value="definite">A. Tích phân xác định (cần đủ 2 cận a, b)</option>
+              <option value="explore">B. Khảo sát hàm số và xem đồ thị (không tính tích phân)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="calc-expr">Hàm số f(x):</label>
+            <input type="text" id="calc-expr" class="form-input" value="2*x" placeholder="Ví dụ: 2*x, x^2, sin(x), exp(-x), sqrt(x+1)">
+            <div class="quick-chips">
+              <button type="button" class="chip-btn" data-target="calc" data-expr="2*x" data-a="0" data-b="5">2*x</button>
+              <button type="button" class="chip-btn" data-target="calc" data-expr="x^2 - 4" data-a="-3" data-b="3">x^2 - 4</button>
+              <button type="button" class="chip-btn" data-target="calc" data-expr="sin(x)" data-a="0" data-b="6.2832">sin(x)</button>
+              <button type="button" class="chip-btn" data-target="calc" data-expr="exp(-x)" data-a="0" data-b="3">exp(-x)</button>
+              <button type="button" class="chip-btn" data-target="calc" data-expr="exp(-x^2)" data-a="-2" data-b="2">exp(-x^2)</button>
+              <button type="button" class="chip-btn" data-target="calc" data-expr="sqrt(x + 1)" data-a="0" data-b="3">sqrt(x+1)</button>
+              <button type="button" class="chip-btn" data-target="calc" data-expr="1/(x^2 + 1)" data-a="-2" data-b="2">1/(x^2+1)</button>
+            </div>
+          </div>
+
+          <div class="form-row-2 form-group">
+            <div>
+              <label class="form-label" for="calc-a">Cận dưới a:</label>
+              <input type="number" step="any" id="calc-a" class="form-input" value="0" placeholder="Nhập cận a">
+            </div>
+            <div>
+              <label class="form-label" for="calc-b">Cận trên b:</label>
+              <input type="number" step="any" id="calc-b" class="form-input" value="5" placeholder="Nhập cận b">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="calc-n">Số khoảng chia N (10 – 1000):</label>
+            <input type="number" id="calc-n" class="form-input" value="200" min="10" max="1000" step="10">
+          </div>
+
+          <div class="form-group">
+            <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.88rem;cursor:pointer;">
+              <input type="checkbox" id="calc-abs" style="width:16px;height:16px;accent-color:var(--primary);">
+              <span>Vẽ đồ thị hàm giá trị tuyệt đối <strong>y = |f(x)|</strong> (diện tích hình học thuần túy)</span>
+            </label>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:0.5rem;">
+            <button type="button" id="btn-calc-analyze" class="btn btn-primary btn-block">Vẽ đồ thị và phân tích</button>
+            <div class="form-row-2">
+              <button type="button" id="btn-calc-reset" class="btn btn-secondary">Đặt lại</button>
+              <button type="button" id="btn-calc-download" class="btn btn-secondary">Tải ảnh PNG</button>
+            </div>
+            <button type="button" id="btn-calc-zoom-reset" class="btn btn-outline btn-sm">Khôi phục khung nhìn đồ thị</button>
+          </div>
+        </div>
+
+        <div>
+          <div class="card" style="margin-bottom:1.25rem;">
+            <div class="card-title">
+              <span>Đồ thị tương tác & Phân tích diện tích có dấu</span>
+              <span style="font-size:0.8rem;color:var(--text-muted);">Xanh: miền dương (f ≥ 0) • Cam: miền âm (f &lt; 0)</span>
+            </div>
+            <div id="calc-plot" class="plot-container"></div>
+
+            <div class="metrics-grid">
+              <div class="metric-box primary-accent">
+                <div class="metric-label">Tích phân xác định (có dấu)</div>
+                <div class="metric-value" id="calc-res-signed">25</div>
+                <div class="metric-sub">∫ₐᵇ f(x) dx (phần dưới Ox mang dấu âm)</div>
+              </div>
+              <div class="metric-box teal-accent">
+                <div class="metric-label">Diện tích hình học phẳng</div>
+                <div class="metric-value" id="calc-res-area">25 đvdt</div>
+                <div class="metric-sub">S = ∫ₐᵇ |f(x)| dx (luôn không âm)</div>
+              </div>
+            </div>
+
+            <div id="calc-res-formula" style="margin-top:0.85rem;text-align:center;"></div>
+            <div id="calc-res-meaning" style="margin-top:0.75rem;padding:0.85rem 1rem;background:var(--bg-subtle);border-radius:8px;font-size:0.92rem;"></div>
+          </div>
+
+          <!-- Giải thích từng bước (Mục 5) -->
+          <div class="card">
+            <div class="card-title">
+              <span>Giải thích từng bước & Phương pháp tính</span>
+            </div>
+            <div id="calc-steps-box"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bảng lịch sử học tập trong phiên -->
+      <div class="card" style="margin-top:1.25rem;">
+        <div class="card-title">
+          <span>Lịch sử tính toán và học tập gần đây</span>
+          <span style="font-size:0.8rem;color:var(--text-muted);">Bật công tắc "Lưu lịch sử" trên thanh đầu trang để ghi vào Google Sheets</span>
+        </div>
+        <div class="table-responsive">
+          <table class="clean-table">
+            <thead>
+              <tr>
+                <th>Thời gian</th>
+                <th>Biểu thức f(x)</th>
+                <th>Đoạn [a, b]</th>
+                <th>Tích phân có dấu</th>
+                <th>Diện tích hình học</th>
+              </tr>
+            </thead>
+            <tbody id="history-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- TRANG 3: THƯ VIỆN ỨNG DỤNG THỰC TẾ (Mục 6 & 7: Chủ đề A -> G)        -->
+    <!-- =================================================================== -->
+    <section id="page-applications" class="page-section">
+      <!-- Khu vực đồ thị tương tác của ứng dụng đang chọn -->
+      <div class="card" id="app-spotlight-card" style="margin-bottom:1.25rem;">
+        <div class="card-title">
+          <span id="app-spotlight-title">Đồ thị mô hình ứng dụng thực tế</span>
+          <span class="badge badge-blue">Cập nhật tự động khi đổi dữ kiện</span>
+        </div>
+        <div id="app-spotlight-summary" style="font-size:0.9rem;color:var(--text-secondary);margin-bottom:0.75rem;"></div>
+        <div id="app-spotlight-plot" class="plot-container" style="height:360px;"></div>
+      </div>
+
+      <!-- Danh sách 7 ứng dụng thực tế (A -> G) với đầy đủ 5 nút tương tác -->
+      <div id="apps-cards-container" class="apps-grid"></div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- TRANG 4: THƯ VIỆN BÀI TOÁN (Đọc từ Google Sheets / Fallback)        -->
+    <!-- =================================================================== -->
+    <section id="page-library" class="page-section">
+      <div class="card" style="margin-bottom:1.25rem;">
+        <div class="card-title">
+          <span>Thư viện bài toán tích phân & Mô hình thực tế</span>
+          <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+            <select id="lib-filter-category" class="form-select" style="width:auto;padding:0.4rem 0.75rem;">
+              <option value="all">Tất cả chủ đề</option>
+              <option value="Vật lý">Vật lý</option>
+              <option value="Sản xuất">Sản xuất</option>
+              <option value="Cấp nước">Cấp nước</option>
+              <option value="Kinh doanh">Kinh doanh</option>
+              <option value="Điện năng">Điện năng</option>
+              <option value="Xây dựng">Xây dựng</option>
+              <option value="Y sinh">Y sinh</option>
+              <option value="Giải tích">Giải tích</option>
+              <option value="Phương pháp số">Phương pháp số</option>
+            </select>
+            <input type="text" id="lib-search-input" class="form-input" style="width:220px;padding:0.4rem 0.75rem;" placeholder="Tìm tên bài hoặc hàm số...">
+          </div>
+        </div>
+
+        <div id="library-detail-box" class="card" style="display:none;background:#eff6ff;border-color:#93c5fd;margin-bottom:1rem;"></div>
+
+        <div class="table-responsive">
+          <table class="clean-table">
+            <thead>
+              <tr>
+                <th>Chủ đề</th>
+                <th>Bài toán & Câu hỏi</th>
+                <th>Mô hình hàm</th>
+                <th>Cận [a, b]</th>
+                <th>Kết quả chuẩn</th>
+                <th>Thao tác</th>
+              </tr>
+            </thead>
+            <tbody id="library-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- TRANG 5: BÀI TẬP LUYỆN TẬP BA CẤP ĐỘ (Mục 8)                         -->
+    <!-- =================================================================== -->
+    <section id="page-exercises" class="page-section">
+      <div class="card" style="margin-bottom:1.25rem;">
+        <div class="card-title">
+          <span>Hệ thống bài tập luyện tập tương tác (3 cấp độ)</span>
+          <div style="display:flex;gap:0.4rem;flex-wrap:wrap;">
+            <button type="button" class="btn btn-primary btn-sm" data-ex-level="all">Tất cả (6)</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-ex-level="Cơ bản">Cơ bản</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-ex-level="Trung bình">Trung bình</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-ex-level="Nâng cao">Nâng cao</button>
+          </div>
+        </div>
+        <p style="font-size:0.9rem;color:var(--text-secondary);">
+          Nhập đáp án số vào ô trả lời và nhấn <strong>Nộp & Kiểm tra</strong>. Hệ thống chấp nhận sai số làm tròn hợp lý và chỉ mở lời giải chi tiết sau khi bạn nộp bài.
+        </p>
+      </div>
+
+      <div id="exercises-list-container"></div>
+    </section>
+
+
+    <!-- =================================================================== -->
+    <!-- TRANG 6: DASHBOARD QUẢN LÝ (THỐNG KÊ, CRUD BÀI TOÁN, LỊCH SỬ, SHEETS)-->
+    <!-- =================================================================== -->
+    <section id="page-dashboard" class="page-section">
+      <div class="kpi-grid-4">
+        <div class="metric-box primary-accent">
+          <div class="metric-label">Tổng bài toán Thư viện</div>
+          <div class="metric-value" id="dash-kpi-examples">9</div>
+          <div class="metric-sub" id="dash-kpi-examples-sub">7 ứng dụng thực tế • 2 bài giải tích</div>
+        </div>
+        <div class="metric-box teal-accent">
+          <div class="metric-label">Tiến độ Bài tập luyện tập</div>
+          <div class="metric-value" id="dash-kpi-exercises">0 / 6</div>
+          <div class="metric-sub" id="dash-kpi-exercises-sub">Đúng 0 câu (0%)</div>
+        </div>
+        <div class="metric-box amber-accent">
+          <div class="metric-label">Lượt phân tích trong phiên</div>
+          <div class="metric-value" id="dash-kpi-calcs">1</div>
+          <div class="metric-sub">Tự động ghi nhận khi tính toán</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Cơ sở dữ liệu Google Sheets</div>
+          <div class="metric-value" id="dash-kpi-db" style="font-size:1.1rem;">Bộ nhớ cục bộ</div>
+          <div class="metric-sub">
+            <button type="button" id="btn-dash-setup-db" class="btn btn-outline btn-sm" style="margin-top:0.25rem;padding:0.2rem 0.5rem;font-size:0.74rem;">Khởi tạo Sheets (setupDatabase)</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="dash-db-status" class="status-banner"></div>
+
+      <div class="workspace-grid" style="margin-bottom:1rem;">
+        <div class="card">
+          <div class="card-title">
+            <span>Thêm / Cập nhật bài toán mới</span>
+            <span class="badge badge-teal">Tự động tính kết quả chuẩn</span>
+          </div>
+
+          <div id="dash-form-status" class="status-banner"></div>
+
+          <div class="form-group">
+            <label class="form-label" for="dash-form-title">Tiêu đề bài toán:</label>
+            <input type="text" id="dash-form-title" class="form-input" placeholder="Ví dụ: Vật lý - Quãng đường phanh xe">
+          </div>
+
+          <div class="form-row-2 form-group">
+            <div>
+              <label class="form-label" for="dash-form-category">Chủ đề:</label>
+              <select id="dash-form-category" class="form-select">
+                <option value="Vật lý">Vật lý</option>
+                <option value="Sản xuất">Sản xuất</option>
+                <option value="Cấp nước">Cấp nước</option>
+                <option value="Kinh doanh">Kinh doanh</option>
+                <option value="Điện năng">Điện năng</option>
+                <option value="Xây dựng">Xây dựng</option>
+                <option value="Y sinh">Y sinh</option>
+                <option value="Giải tích">Giải tích</option>
+                <option value="Phương pháp số">Phương pháp số</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label" for="dash-form-difficulty">Cấp độ:</label>
+              <select id="dash-form-difficulty" class="form-select">
+                <option value="Cơ bản">Cơ bản</option>
+                <option value="Trung bình">Trung bình</option>
+                <option value="Nâng cao">Nâng cao</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="dash-form-expr">Biểu thức hàm số f(x):</label>
+            <input type="text" id="dash-form-expr" class="form-input" value="4*x + 2" placeholder="Ví dụ: 4*x + 2, x^2, sin(x)">
+          </div>
+
+          <div class="form-row-3 form-group">
+            <div>
+              <label class="form-label" for="dash-form-a">Cận dưới a:</label>
+              <input type="number" step="any" id="dash-form-a" class="form-input" value="0">
+            </div>
+            <div>
+              <label class="form-label" for="dash-form-b">Cận trên b:</label>
+              <input type="number" step="any" id="dash-form-b" class="form-input" value="5">
+            </div>
+            <div>
+              <label class="form-label" for="dash-form-init">Giá trị đầu C₀:</label>
+              <input type="number" step="any" id="dash-form-init" class="form-input" value="0">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="dash-form-unit">Đơn vị kết quả (m, lít, kWh, nghìn đồng...):</label>
+            <input type="text" id="dash-form-unit" class="form-input" value="m">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="dash-form-question">Câu hỏi / Mô tả tình huống:</label>
+            <input type="text" id="dash-form-question" class="form-input" placeholder="Nhập câu hỏi bài toán...">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="dash-form-meaning">Giải thích ý nghĩa thực tế:</label>
+            <input type="text" id="dash-form-meaning" class="form-input" placeholder="Nhập giải thích ngắn gọn...">
+          </div>
+
+          <div class="form-row-2">
+            <button type="button" id="btn-dash-save-example" class="btn btn-primary">Lưu vào Thư viện</button>
+            <button type="button" id="btn-dash-reset-form" class="btn btn-secondary">Làm mới biểu mẫu</button>
+          </div>
+        </div>
+
+        <div>
+          <div class="card" style="margin-bottom:1rem;">
+            <div class="card-title">
+              <span>Thống kê phân bố bài toán theo Chủ đề</span>
+              <span class="badge badge-blue">Cập nhật tự động</span>
+            </div>
+            <div id="dash-category-breakdown"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">
+              <span>Danh sách Quản lý Thư viện bài toán</span>
+              <span style="font-size:0.78rem;color:var(--text-muted);">Sửa, xoá hoặc nạp nhanh vào Máy tính</span>
+            </div>
+            <div class="table-responsive" style="max-height:285px;overflow-y:auto;">
+              <table class="clean-table">
+                <thead>
+                  <tr>
+                    <th>Chủ đề</th>
+                    <th>Tiêu đề</th>
+                    <th>Hàm số</th>
+                    <th>Cận</th>
+                    <th>Kết quả</th>
+                    <th>Quản lý</th>
+                  </tr>
+                </thead>
+                <tbody id="dash-examples-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <span>Nhật ký Hoạt động &amp; Lịch sử học tập</span>
+          <div style="display:flex;gap:0.45rem;flex-wrap:wrap;align-items:center;">
+            <select id="dash-history-filter" class="form-select" style="width:auto;padding:0.34rem 0.65rem;">
+              <option value="all">Tất cả thao tác</option>
+              <option value="CALCULATE">Máy tính tích phân</option>
+              <option value="EXERCISE">Bài tập luyện tập</option>
+            </select>
+            <button type="button" id="btn-dash-export-csv" class="btn btn-primary btn-sm">Xuất báo cáo CSV</button>
+            <button type="button" id="btn-dash-clear-history" class="btn btn-danger btn-sm">Xoá lịch sử phiên</button>
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table class="clean-table">
+            <thead>
+              <tr>
+                <th>Thời gian</th>
+                <th>Loại</th>
+                <th>Biểu thức</th>
+                <th>Đoạn [a, b]</th>
+                <th>Tích phân</th>
+                <th>Ghi chú chi tiết</th>
+              </tr>
+            </thead>
+            <tbody id="dash-history-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer-bar">
+      Integral Lab – Phòng thí nghiệm tích phân trực quan • Phát triển trên nền tảng Google Apps Script HTML Service, Plotly.js, Math.js &amp; MathJax.
+    </footer>
+  </main>
+
+    <?!= include('Graph'); ?>
+  <?!= include('Scripts'); ?>
+</body>
+</html>
